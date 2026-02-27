@@ -1,0 +1,27 @@
+# MAGNN-LSTM Transit Travel Time Prediction
+# ==========================================
+# Install with: pip install -r requirements.txt
+#
+# For GPU support, install PyTorch separately first:
+#   https://pytorch.org/get-started/locally/
+
+# Core scientific stack
+numpy>=1.24
+pandas>=2.0
+scipy>=1.11
+
+# Machine learning
+scikit-learn>=1.3
+
+# Deep learning (CPU build — replace with CUDA build if using GPU)
+torch>=2.0
+torchvision>=0.15
+
+# Clustering — HDBSCAN is optional (cluster_hdbscan.py degrades gracefully if missing)
+hdbscan>=0.8.33
+
+# Geospatial / mapping
+contextily>=1.4
+
+# Visualisation
+matplotlib>=3.7
