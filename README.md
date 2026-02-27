@@ -1,1 +1,1 @@
-# -THS3-HXIL-RightOnTrack
+# THS3-HXIL-RightOnTrack
