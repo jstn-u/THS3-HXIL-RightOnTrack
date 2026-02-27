@@ -20,7 +20,11 @@ visualisations, metrics — is identical regardless of method.
 # =============================================================================
 # CLUSTERING METHOD — change this ONE line to swap methods
 # =============================================================================
-from cluster_hdbscan import event_driven_clustering_fixed   # ← swap here
+from cluster_knn     import event_driven_clustering_fixed   # ← swap here
+
+# Derived automatically from the module name — never needs manual editing.
+# cluster_hdbscan → HDBSCAN,  cluster_knn → KNN,  cluster_gmm → GMM, etc.
+ALGORITHM_NAME = event_driven_clustering_fixed.__module__.replace('cluster_', '').upper()
 
 # =============================================================================
 # SHARED MODULES
@@ -53,11 +57,9 @@ def main():
 
     config = Config()
 
-    clustering_method = event_driven_clustering_fixed.__module__.replace('cluster_', '').upper()
-
     print_section("MAGNN-LSTM TRAINING CONFIGURATION")
     print(f"  Device: {DEVICE}")
-    print(f"  Clustering / graph construction: {clustering_method}")
+    print(f"  Algorithm: {ALGORITHM_NAME}")
     print(f"  Data sampling: {config.sample_fraction * 100}%")
     print(f"  Iterations: {config.n_iterations}")
     print(f"  Epochs per iteration: {config.n_epochs}")
@@ -115,12 +117,16 @@ def main():
             # 4. PLOTS  — generated before training so you always see them
             # ------------------------------------------------------------------
             print_section("GENERATING VISUALISATIONS")
+
             plot_clusters(clusters, {},
-                          save_path=os.path.join(output_folder, 'hdbscan-clusters.png'))
+                          algorithm_name=ALGORITHM_NAME,
+                          save_path=os.path.join(output_folder, f'{ALGORITHM_NAME.lower()}-clusters.png'))
             plot_segments(train_segments, clusters, max_segments=100,
-                          save_path=os.path.join(output_folder, 'hdbscan-segments.png'))
+                          algorithm_name=ALGORITHM_NAME,
+                          save_path=os.path.join(output_folder, f'{ALGORITHM_NAME.lower()}-segments.png'))
             plot_segment_statistics(train_segments,
-                                    save_path=os.path.join(output_folder, 'hdbscan-segment_stats.png'))
+                                    algorithm_name=ALGORITHM_NAME,
+                                    save_path=os.path.join(output_folder, f'{ALGORITHM_NAME.lower()}-segment_stats.png'))
 
             # ------------------------------------------------------------------
             # 5. Adjacency matrices
@@ -200,7 +206,7 @@ def main():
             # 8. Save metrics JSON
             # ------------------------------------------------------------------
             metrics_out = {
-                'graph_method': 'hdbscan',
+                'graph_method': ALGORITHM_NAME.lower(),
                 'config': {
                     'n_epochs':        config.n_epochs,
                     'batch_size':      config.batch_size,
@@ -234,9 +240,9 @@ def main():
 
             print(f"\n✅ Iteration {iteration} complete")
             print(f"   Output files saved to: {output_folder}/")
-            print(f"     - hdbscan-clusters.png      (cluster locations)")
-            print(f"     - hdbscan-segments.png      (segment connections)")
-            print(f"     - hdbscan-segment_stats.png (segment statistics)")
+            print(f"     - {ALGORITHM_NAME.lower()}-clusters.png      (cluster locations)")
+            print(f"     - {ALGORITHM_NAME.lower()}-segments.png      (segment connections)")
+            print(f"     - {ALGORITHM_NAME.lower()}-segment_stats.png (segment statistics)")
             print(f"     - metrics.json              (evaluation metrics)")
             print(f"     - magtte_best.pth           (saved model weights)")
 

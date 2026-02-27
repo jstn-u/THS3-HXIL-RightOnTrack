@@ -4,9 +4,9 @@ visualizations.py
 Cluster and segment visualisation functions — shared across all methods.
 
 Public API:
-    plot_clusters(cluster_centers, cluster_info, save_path)
-    plot_segments(segments_df, cluster_centers, max_segments, save_path)
-    plot_segment_statistics(segments_df, save_path)
+    plot_clusters(cluster_centers, cluster_info, algorithm_name, save_path)
+    plot_segments(segments_df, cluster_centers, max_segments, algorithm_name, save_path)
+    plot_segment_statistics(segments_df, algorithm_name, save_path)
 """
 
 import numpy as np
@@ -26,12 +26,18 @@ warnings.filterwarnings('ignore')
 # VISUALISATION FUNCTIONS
 # =============================================================================
 
-def plot_clusters(cluster_centers, cluster_info, save_path='clusters_plot.png'):
+def plot_clusters(cluster_centers, cluster_info, algorithm_name='HDBSCAN', save_path='clusters_plot.png'):
     """
     Visualise cluster locations on a geographic map with CartoDB basemap.
     Falls back to a plain lat/lon plot if basemap cannot be loaded.
+
+    Parameters
+    ----------
+    algorithm_name : str
+        Name of the clustering algorithm (e.g. 'HDBSCAN', 'KNN', 'DBSCAN').
+        Used in all plot titles, labels, and print messages.
     """
-    print_section("VISUALISING CLUSTERS")
+    print_section(f"VISUALISING {algorithm_name.upper()} CLUSTERS")
 
     if len(cluster_centers) == 0:
         print("✗ No clusters to visualise")
@@ -161,7 +167,7 @@ def plot_clusters(cluster_centers, cluster_info, save_path='clusters_plot.png'):
         ax.set_xlabel('Longitude', fontsize=14, fontweight='bold')
         ax.set_ylabel('Latitude',  fontsize=14, fontweight='bold')
 
-    ax.set_title(f'HDBSCAN Cluster Locations on Geographic Map (n={len(cluster_centers)})',
+    ax.set_title(f'{algorithm_name} Cluster Locations on Geographic Map (n={len(cluster_centers)})',
                  fontsize=16, fontweight='bold', pad=20)
     ax.grid(True, alpha=0.3, linestyle='--', linewidth=0.5, zorder=1)
 
@@ -181,18 +187,23 @@ def plot_clusters(cluster_centers, cluster_info, save_path='clusters_plot.png'):
 
     plt.tight_layout()
     plt.savefig(save_path, dpi=200, bbox_inches='tight', facecolor='white')
-    print(f"✓ Saved cluster plot to: {save_path}")
+    print(f"✓ Saved {algorithm_name} cluster plot to: {save_path}")
     plt.close()
 
 
 
 def plot_segments(segments_df, cluster_centers, max_segments=100,
-                  save_path='segments_plot.png'):
+                  algorithm_name='HDBSCAN', save_path='segments_plot.png'):
     """
     Two-panel figure: full view and 60%-zoom magnified view of segment connections.
     Line width and opacity scale with segment frequency.
+
+    Parameters
+    ----------
+    algorithm_name : str
+        Name of the clustering algorithm. Used in titles and print messages.
     """
-    print_section("VISUALISING SEGMENTS")
+    print_section(f"VISUALISING {algorithm_name.upper()} SEGMENTS")
 
     if segments_df is None or len(segments_df) == 0 or len(cluster_centers) == 0:
         print("✗ No segments to visualise")
@@ -241,7 +252,7 @@ def plot_segments(segments_df, cluster_centers, max_segments=100,
 
         ax.set_xlabel('Longitude', fontsize=12, fontweight='bold')
         ax.set_ylabel('Latitude',  fontsize=12, fontweight='bold')
-        ax.set_title(f'HDBSCAN Transit Segments — {view_name}',
+        ax.set_title(f'{algorithm_name} Transit Segments — {view_name}',
                      fontsize=13, fontweight='bold')
         ax.grid(True, alpha=0.4, linestyle='--')
         ax.legend(loc='upper right', fontsize=10)
@@ -257,17 +268,22 @@ def plot_segments(segments_df, cluster_centers, max_segments=100,
 
     plt.tight_layout()
     plt.savefig(save_path, dpi=200, bbox_inches='tight')
-    print(f"✓ Saved segments plot to: {save_path}")
+    print(f"✓ Saved {algorithm_name} segments plot to: {save_path}")
     plt.close()
 
 
 
-def plot_segment_statistics(segments_df, save_path='segment_stats.png'):
+def plot_segment_statistics(segments_df, algorithm_name='HDBSCAN', save_path='segment_stats.png'):
     """
     2×2 grid: travel-time histogram, distance histogram, speed histogram,
     and a horizontal bar chart of the top-20 most-frequent segment connections.
+
+    Parameters
+    ----------
+    algorithm_name : str
+        Name of the clustering algorithm. Used in titles and print messages.
     """
-    print_section("VISUALISING SEGMENT STATISTICS")
+    print_section(f"VISUALISING {algorithm_name.upper()} SEGMENT STATISTICS")
 
     if segments_df is None or len(segments_df) == 0:
         print("✗ No segments to visualise")
@@ -279,21 +295,21 @@ def plot_segment_statistics(segments_df, save_path='segment_stats.png'):
                     color='skyblue', edgecolor='black')
     axes[0, 0].set_xlabel('Travel Time (seconds)')
     axes[0, 0].set_ylabel('Frequency')
-    axes[0, 0].set_title('Travel Time Distribution')
+    axes[0, 0].set_title(f'{algorithm_name} — Travel Time Distribution')
     axes[0, 0].grid(True, alpha=0.3)
 
     axes[0, 1].hist(segments_df['distance_m'], bins=50,
                     color='lightgreen', edgecolor='black')
     axes[0, 1].set_xlabel('Distance (meters)')
     axes[0, 1].set_ylabel('Frequency')
-    axes[0, 1].set_title('Distance Distribution')
+    axes[0, 1].set_title(f'{algorithm_name} — Distance Distribution')
     axes[0, 1].grid(True, alpha=0.3)
 
     axes[1, 0].hist(segments_df['speed_mps'], bins=50,
                     color='salmon', edgecolor='black')
     axes[1, 0].set_xlabel('Speed (m/s)')
     axes[1, 0].set_ylabel('Frequency')
-    axes[1, 0].set_title('Speed Distribution')
+    axes[1, 0].set_title(f'{algorithm_name} — Speed Distribution')
     axes[1, 0].grid(True, alpha=0.3)
 
     seg_counts = (segments_df
@@ -310,16 +326,15 @@ def plot_segment_statistics(segments_df, save_path='segment_stats.png'):
     axes[1, 1].set_yticks(range(len(seg_counts)))
     axes[1, 1].set_yticklabels(y_labels, fontsize=8)
     axes[1, 1].set_xlabel('Frequency')
-    axes[1, 1].set_title('Top 20 Segment Connections')
+    axes[1, 1].set_title(f'{algorithm_name} — Top 20 Segment Connections')
     axes[1, 1].grid(True, alpha=0.3, axis='x')
 
     plt.tight_layout()
     plt.savefig(save_path, dpi=150, bbox_inches='tight')
-    print(f"✓ Saved segment statistics plot to: {save_path}")
+    print(f"✓ Saved {algorithm_name} segment statistics plot to: {save_path}")
     plt.close()
 
 
 # =============================================================================
 # SIMPLE MLP  (lightweight fallback model — no GAT/LSTM)
 # =============================================================================
-
