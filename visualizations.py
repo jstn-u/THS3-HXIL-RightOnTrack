@@ -122,8 +122,6 @@ def plot_clusters(cluster_centers, cluster_info, algorithm_name='HDBSCAN', save_
                                   edgecolor='red', linewidth=2, alpha=0.95),
                         zorder=11)
 
-        ax.set_xlabel('Longitude', fontsize=14, fontweight='bold')
-        ax.set_ylabel('Latitude',  fontsize=14, fontweight='bold')
         print("✓ Geographic basemap added successfully")
 
     except Exception as e:
@@ -164,26 +162,25 @@ def plot_clusters(cluster_centers, cluster_info, algorithm_name='HDBSCAN', save_
                         zorder=11)
 
         ax.set_facecolor('#e8e8e8')
-        ax.set_xlabel('Longitude', fontsize=14, fontweight='bold')
-        ax.set_ylabel('Latitude',  fontsize=14, fontweight='bold')
 
-    ax.set_title(f'{algorithm_name} Cluster Locations on Geographic Map (n={len(cluster_centers)})',
-                 fontsize=16, fontweight='bold', pad=20)
+    ax.set_xticklabels([])
+    ax.set_yticklabels([])
+
     ax.grid(True, alpha=0.3, linestyle='--', linewidth=0.5, zorder=1)
 
-    cbar = plt.colorbar(scatter, ax=ax, orientation='vertical',
-                        fraction=0.05, location='right',
-                        label='Cluster Density (darker = more dense)')
-    cbar.ax.invert_yaxis()
-    cbar.ax.tick_params(labelsize=9)
-
     from matplotlib.lines import Line2D
-    legend_elements = [
+    station_legend = [
         Line2D([0], [0], marker='o', color='w',
                markerfacecolor='red', markeredgecolor='white',
                markersize=12, label='Light Rail Stations', markeredgewidth=2)
     ]
-    ax.legend(handles=legend_elements, loc='upper right', fontsize=11)
+    cluster_legend = [
+        Line2D([0], [0], color='none',
+               label=f'{algorithm_name} Clusters: {len(cluster_centers)}')
+    ]
+    leg1 = ax.legend(handles=station_legend, loc='upper right', fontsize=11)
+    ax.add_artist(leg1)
+    ax.legend(handles=cluster_legend, loc='upper left', fontsize=11, handlelength=0, handletextpad=0)
 
     plt.tight_layout()
     plt.savefig(save_path, dpi=200, bbox_inches='tight', facecolor='white')
@@ -333,8 +330,3 @@ def plot_segment_statistics(segments_df, algorithm_name='HDBSCAN', save_path='se
     plt.savefig(save_path, dpi=150, bbox_inches='tight')
     print(f"✓ Saved {algorithm_name} segment statistics plot to: {save_path}")
     plt.close()
-
-
-# =============================================================================
-# SIMPLE MLP  (lightweight fallback model — no GAT/LSTM)
-# =============================================================================

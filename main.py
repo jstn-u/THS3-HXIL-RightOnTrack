@@ -20,7 +20,7 @@ visualisations, metrics — is identical regardless of method.
 # =============================================================================
 # CLUSTERING METHOD — change this ONE line to swap methods
 # =============================================================================
-from cluster_knn     import event_driven_clustering_fixed   # ← swap here
+from cluster_dbscan  import event_driven_clustering_fixed   # ← swap here
 
 # Derived automatically from the module name — never needs manual editing.
 # cluster_hdbscan → HDBSCAN,  cluster_knn → KNN,  cluster_gmm → GMM, etc.
@@ -71,7 +71,7 @@ def main():
         print_section(f"ITERATION {iteration}/{config.n_iterations}")
 
         timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
-        output_folder = f"outputs/magnn_run_{timestamp}_iter{iteration}"
+        output_folder = f"outputs/{ALGORITHM_NAME}_{timestamp}_i{iteration}"
         os.makedirs(output_folder, exist_ok=True)
         print(f"📁 Output: {output_folder}")
 
