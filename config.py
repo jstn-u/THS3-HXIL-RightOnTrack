@@ -64,7 +64,7 @@ class Config:
     # =========================================================================
     data_folder = './data'
 
-    sample_fraction = 0.01
+    sample_fraction = 0.25
     """
     SAMPLE_FRACTION: What percentage of data to use
     - 0.1 = 10% of trips (FAST - for testing/debugging)

@@ -301,6 +301,7 @@ def _assign_social_vectors_to_clusters(clusters, soc_df_with_coords):
 
 
 def build_adjacency_matrices_fixed(segments_df, clusters,
+                                   known_stops=None,
                                    social_path='./data/social_function.csv'):
     """
     Build three N×N adjacency matrices  (N = number of unique segment types).
@@ -381,7 +382,7 @@ def build_adjacency_matrices_fixed(segments_df, clusters,
     # ------------------------------------------------------------------
     # 3. Social — cosine similarity on [Level 1, Level 2, Level 3]
     # ------------------------------------------------------------------
-    global _known_stops_cache
+    _cache = known_stops or {}
 
     if os.path.exists(social_path):
         soc_df = pd.read_csv(social_path).dropna(subset=['station'])
@@ -389,18 +390,18 @@ def build_adjacency_matrices_fixed(segments_df, clusters,
 
         # ── Build soc_df_with_coords via GPS nearest-neighbour ─────────────
         # For each social station name, find the best GPS coordinate from
-        # _known_stops_cache by searching for the known-stop whose name
+        # _cache by searching for the known-stop whose name
         # shares the most characters with the social station name, then
-        # verifying with a distance check.  If _known_stops_cache is empty
+        # verifying with a distance check.  If _cache is empty
         # (no originStopName / destinationStopName columns in the data),
         # we still do a pure name match.
         #
         # This is purely distance-driven once coordinates are in play.
         soc_df_with_coords = []
 
-        if _known_stops_cache:
-            known_names  = list(_known_stops_cache.keys())
-            known_coords = np.array([_known_stops_cache[n] for n in known_names])  # (K, 2)
+        if _cache:
+            known_names  = list(_cache.keys())
+            known_coords = np.array([_cache[n] for n in known_names])  # (K, 2)
 
             for _, srow in soc_df.iterrows():
                 soc_name = str(srow['station']).strip()
@@ -429,7 +430,7 @@ def build_adjacency_matrices_fixed(segments_df, clusters,
                         best_score, best_name = score, kn
 
                 if best_name and best_score >= 0.25:
-                    lat, lon = _known_stops_cache[best_name]
+                    lat, lon = _cache[best_name]
                     soc_df_with_coords.append((soc_name, lat, lon, soc_vec))
                     print(f"     Social '{soc_name}' → GPS match '{best_name}' "
                           f"(score={best_score:.2f}, "
@@ -452,7 +453,7 @@ def build_adjacency_matrices_fixed(segments_df, clusters,
         else:
             # No known-stop coords at all — create dummy coords so at least
             # the cosine similarity matrix can be built from the vectors
-            print("     ⚠️  _known_stops_cache is empty — "
+            print("     ⚠️  known_stops cache is empty — "
                   "social vectors will be assigned but GPS distances are 0")
             for _, srow in soc_df.iterrows():
                 soc_name = str(srow['station']).strip()

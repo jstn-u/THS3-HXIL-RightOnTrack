@@ -15,6 +15,7 @@ To switch clustering method in main.py, change only:
 import numpy as np
 import pandas as pd
 from sklearn.neighbors import BallTree
+from sklearn.cluster import AgglomerativeClustering
 import warnings
 
 warnings.filterwarnings('ignore')
@@ -44,15 +45,22 @@ def event_driven_clustering_fixed(df, known_stops=None):
     finds enough points nearby.  This ensures all 13 real stations are
     present in the cluster list even when the sample fraction is small.
 
-    After HDBSCAN:
-      1. Any detected cluster whose centre is within MERGE_RADIUS_M of a
-         known station centre is dropped (the station centre takes over).
-      2. Station clusters are prepended to the array so their indices are
-         0 … (n_stations-1).  Delay clusters follow at higher indices.
+    After HDBSCAN, the pipeline runs in this order:
+      1. HDBSCAN finds delay hotspot candidates from event points.
+      2. Drop any candidate within MERGE_RADIUS_M of a known station
+         (operating on raw HDBSCAN coordinates before any averaging).
+      3. Merge remaining candidates using complete-linkage agglomerative
+         clustering (all pairs in a group must be within 50m — prevents
+         chain merging that produces centroids far from any real hotspot).
+      4. Enforce minimum spacing (300m) between all surviving delay clusters
+         and between delay clusters and stations — prevents short segments
+         that produce near-zero duration training samples.
+      5. Assemble final array: stations first (indices 0…n_stations-1),
+         delay clusters follow at higher indices.
 
     Returns
     ───────
-    cluster_centers  : np.ndarray  shape (N, 2)  — [lat, lon] per cluster
+    cluster_centers     : np.ndarray  shape (N, 2)  — [lat, lon] per cluster
     station_cluster_ids : set of int — indices that are real stations
     """
     print_section("EVENT-DRIVEN CLUSTERING")
@@ -119,35 +127,13 @@ def event_driven_clustering_fixed(df, known_stops=None):
         print("   ⚠️  Too few event points for HDBSCAN — only station centres used")
 
     # ------------------------------------------------------------------
-    # 2. Merge nearby delay clusters (within 100 m of each other)
-    # ------------------------------------------------------------------
-    if delay_centers:
-        delay_arr = np.array(delay_centers)
-        merged = []
-        used = set()
-        for i in range(len(delay_arr)):
-            if i in used:
-                continue
-            group = [i]
-            for j in range(i + 1, len(delay_arr)):
-                if j in used:
-                    continue
-                if haversine_meters(delay_arr[i, 0], delay_arr[i, 1],
-                                    delay_arr[j, 0], delay_arr[j, 1]) < 100:
-                    group.append(j)
-                    used.add(j)
-            used.add(i)
-            merged.append([np.mean([delay_arr[k, 0] for k in group]),
-                            np.mean([delay_arr[k, 1] for k in group])])
-        delay_centers = merged
-
-    # ------------------------------------------------------------------
-    # 3. Drop any delay cluster whose centre is within MERGE_RADIUS_M of
-    #    a known station (the station's precise coordinate takes over)
+    # 2. Drop delay clusters within MERGE_RADIUS_M of a known station FIRST
+    #    (operates on raw HDBSCAN coordinates before any averaging so the
+    #    station absorption decision is made on precise original positions)
     # ------------------------------------------------------------------
     MERGE_RADIUS_M = 300   # metres — same as cluster-assign radius
 
-    filtered_delay = []
+    pre_filtered = []
     for dc in delay_centers:
         too_close = False
         for (s_lat, s_lon, _) in station_centers:
@@ -155,14 +141,92 @@ def event_driven_clustering_fixed(df, known_stops=None):
                 too_close = True
                 break
         if not too_close:
-            filtered_delay.append(dc)
+            pre_filtered.append(dc)
 
-    dropped = len(delay_centers) - len(filtered_delay)
-    if dropped:
-        print(f"   Dropped {dropped} delay cluster(s) absorbed by station zones")
+    dropped_by_station = len(delay_centers) - len(pre_filtered)
+    if dropped_by_station:
+        print(f"   Dropped {dropped_by_station} delay cluster(s) absorbed by "
+              f"station zones (radius={MERGE_RADIUS_M}m)")
 
     # ------------------------------------------------------------------
-    # 4. Assemble final cluster array
+    # 3. Merge remaining delay clusters using complete-linkage clustering
+    #    Complete linkage: ALL pairs within a group must be within 50m.
+    #    This prevents chain merging where A merges with B and B merges
+    #    with C even if A and C are far apart, which produces centroids
+    #    that don't correspond to any real-world hotspot.
+    # ------------------------------------------------------------------
+    filtered_delay = pre_filtered  # default if too few clusters to merge
+
+    if len(pre_filtered) > 1:
+        delay_arr = np.array(pre_filtered)
+        n = len(delay_arr)
+
+        # Build full pairwise haversine distance matrix
+        dist_matrix = np.zeros((n, n))
+        for i in range(n):
+            for j in range(n):
+                dist_matrix[i, j] = haversine_meters(
+                    delay_arr[i, 0], delay_arr[i, 1],
+                    delay_arr[j, 0], delay_arr[j, 1]
+                )
+
+        agg = AgglomerativeClustering(
+            n_clusters=None,
+            distance_threshold=50,   # only merge if truly on top of each other
+            metric='precomputed',
+            linkage='complete'       # strictest linkage — no chain merging
+        )
+        group_labels = agg.fit_predict(dist_matrix)
+
+        merged = []
+        for label in np.unique(group_labels):
+            members = delay_arr[group_labels == label]
+            merged.append([members[:, 0].mean(), members[:, 1].mean()])
+
+        filtered_delay = merged
+        print(f"   Complete-linkage merging: {len(pre_filtered)} → "
+              f"{len(filtered_delay)} delay clusters (threshold=50m)")
+    elif len(pre_filtered) == 1:
+        print(f"   Single delay cluster — no merging needed")
+    else:
+        print(f"   No delay clusters survived station absorption")
+
+    # ------------------------------------------------------------------
+    # 4. Enforce minimum spacing between all surviving delay clusters
+    #    and between delay clusters and stations.
+    #    Prevents clusters so close together that the segments between
+    #    them are too short to produce meaningful duration training samples.
+    #    300m matches CLUSTER_ASSIGN_RADIUS_M — closer than this and GPS
+    #    points are ambiguous about which cluster they belong to anyway.
+    # ------------------------------------------------------------------
+    MIN_CLUSTER_SPACING_M = 300
+
+    final_delay = []
+    # Seed the kept-coords list with all station positions so delay clusters
+    # are also checked against stations (belt-and-suspenders after step 2)
+    all_kept_coords = [(s_lat, s_lon) for (s_lat, s_lon, _) in station_centers]
+
+    for dc in filtered_delay:
+        too_close = False
+        for kept_lat, kept_lon in all_kept_coords:
+            if haversine_meters(dc[0], dc[1], kept_lat, kept_lon) < MIN_CLUSTER_SPACING_M:
+                too_close = True
+                break
+        if not too_close:
+            final_delay.append(dc)
+            # Add to kept list so subsequent delay clusters are also checked
+            # against this one — enforces spacing between delay clusters too
+            all_kept_coords.append((dc[0], dc[1]))
+
+    dropped_by_spacing = len(filtered_delay) - len(final_delay)
+    if dropped_by_spacing:
+        print(f"   Dropped {dropped_by_spacing} delay cluster(s) violating "
+              f"minimum spacing ({MIN_CLUSTER_SPACING_M}m)")
+
+    filtered_delay = final_delay
+
+    # ------------------------------------------------------------------
+    # 5. Assemble final cluster array
     #    Stations first (indices 0 … n_stations-1) so we know exactly
     #    which indices correspond to real stations.
     # ------------------------------------------------------------------
@@ -188,4 +252,3 @@ def event_driven_clustering_fixed(df, known_stops=None):
 # =============================================================================
 # SEGMENT BUILDING - CORRECTED VERSION
 # =============================================================================
-

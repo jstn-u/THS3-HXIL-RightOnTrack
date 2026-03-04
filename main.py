@@ -20,7 +20,7 @@ visualisations, metrics — is identical regardless of method.
 # =============================================================================
 # CLUSTERING METHOD — change this ONE line to swap methods
 # =============================================================================
-from cluster_dbscan  import event_driven_clustering_fixed   # ← swap here
+from cluster_hdbscan  import event_driven_clustering_fixed   # ← swap here
 
 # Derived automatically from the module name — never needs manual editing.
 # cluster_hdbscan → HDBSCAN,  cluster_knn → KNN,  cluster_gmm → GMM, etc.
@@ -132,7 +132,8 @@ def main():
             # 5. Adjacency matrices
             # ------------------------------------------------------------------
             adj_geo, adj_dist, adj_soc, segment_types = build_adjacency_matrices_fixed(
-                train_segments, clusters
+                train_segments, clusters,
+                known_stops=known_stops
             )
 
             if adj_geo is None:
