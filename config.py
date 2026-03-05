@@ -21,7 +21,7 @@ import matplotlib
 matplotlib.use('Agg')  # non-interactive backend — safe for all environments
 import matplotlib.pyplot as plt
 import matplotlib.patches as mpatches
-import contextily as ctx
+import contextlib as ctx
 
 import torch
 import torch.nn as nn
@@ -114,15 +114,25 @@ class Config:
     lstm_hidden = 64       # LSTM hidden state size            (was 128)
     historical_dim = 16    # per-segment historical embedding  (was 32)
 
+    # =========================================================================
+    # MTL PARAMETERS (Multi-Task Learning)
+    # =========================================================================
+    mtl_lambda = 0.5       # Balance between individual (0.0) and collective (1.0) tasks
+    """
+    MTL_LAMBDA: Controls the balance in multi-task learning
+    - 0.0 = Only individual segment predictions matter
+    - 0.5 = Equal weight to individual and collective predictions (RECOMMENDED)
+    - 1.0 = Only collective path prediction matters
+    
+    AttentionTTE paper uses 0.5 for balanced learning
+    """
+
+    mtl_segment_hidden = 64    # Hidden units in segment predictor
+    mtl_path_hidden = 128      # Hidden units in path predictor
+
 
 # Create config instance
 config = Config()
-
-
-# =============================================================================
-# UTILITY FUNCTIONS
-# =============================================================================
-
 
 
 # =============================================================================
@@ -136,7 +146,6 @@ def print_section(title):
     print("=" * 80)
 
 
-
 def haversine_meters(lat1, lon1, lat2, lon2):
     """Calculate great circle distance in meters."""
     lat1, lon1, lat2, lon2 = map(radians, [lat1, lon1, lat2, lon2])
@@ -145,9 +154,3 @@ def haversine_meters(lat1, lon1, lat2, lon2):
     a = sin(dlat / 2) ** 2 + cos(lat1) * cos(lat2) * sin(dlon / 2) ** 2
     c = 2 * asin(sqrt(a))
     return c * 6371000
-
-
-# =============================================================================
-# DATA LOADING
-# =============================================================================
-

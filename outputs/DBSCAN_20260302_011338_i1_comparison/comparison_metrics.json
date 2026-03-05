@@ -1,0 +1,35 @@
+{
+  "iteration": 1,
+  "algorithm": "DBSCAN",
+  "config": {
+    "n_epochs": 50,
+    "batch_size": 64,
+    "learning_rate": 0.001,
+    "sample_fraction": 0.01
+  },
+  "magnn": {
+    "Train": {
+      "r2": "0.6617",
+      "rmse": "11.8615",
+      "mae": "8.6070",
+      "mape": "28.9999"
+    },
+    "Val": {
+      "r2": "-0.5077",
+      "rmse": "24.4151",
+      "mae": "20.4085",
+      "mape": "34.5543"
+    },
+    "Test": {
+      "r2": "0.6185",
+      "rmse": "12.0566",
+      "mae": "8.9382",
+      "mape": "33.5143"
+    }
+  },
+  "magnn_lstm": {
+    "Train": {
+      "r2": "0.4203",
+      "rmse": "15.5287",
+      "mae": "10.9742",
+      "mape": 
