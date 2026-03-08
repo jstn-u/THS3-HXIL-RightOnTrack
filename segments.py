@@ -436,24 +436,13 @@ def build_adjacency_matrices_fixed(segments_df, clusters,
                           f"(score={best_score:.2f}, "
                           f"{lat:.6f}, {lon:.6f})")
                 else:
-                    # Fallback: use the GPS-closest known stop regardless of name
-                    dists_all = np.array([
-                        haversine_meters(known_coords[k, 0], known_coords[k, 1],
-                                         known_coords[k, 0], known_coords[k, 1])
-                        for k in range(len(known_names))
-                    ])
-                    # That loop is degenerate; use centroid fallback instead
-                    centroid_lat = known_coords[:, 0].mean()
-                    centroid_lon = known_coords[:, 1].mean()
-                    soc_df_with_coords.append(
-                        (soc_name, centroid_lat, centroid_lon, soc_vec)
-                    )
-                    print(f"     Social '{soc_name}' → no name match, "
-                          f"using network centroid as GPS proxy")
+                    print(f"     Social '{soc_name}' → no name match "
+                          f"(best score={best_score:.2f}) — skipping")
+                    # Do not append — a wrong GPS assignment corrupts the social matrix
         else:
             # No known-stop coords at all — create dummy coords so at least
             # the cosine similarity matrix can be built from the vectors
-            print("     ⚠️  known_stops cache is empty — "
+            print("     ⚠️  known_stops is empty — "
                   "social vectors will be assigned but GPS distances are 0")
             for _, srow in soc_df.iterrows():
                 soc_name = str(srow['station']).strip()

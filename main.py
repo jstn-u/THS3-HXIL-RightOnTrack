@@ -88,9 +88,19 @@ def main():
                 print("❌ No training data")
                 continue
 
-            # Extract known named stops BEFORE clustering so we can mark them
-            known_stops = get_known_stops(train_df)
-            print(f"   Known stops found in data: {len(known_stops)}")
+            # Extract known named stops from ALL splits so stations that only
+            # appear in test/val (e.g. Gungahlin Place, Sandford Street) are
+            # still injected as cluster centres.  Train coords take priority;
+            # test and val fill in any stations absent from the training split.
+            known_stops_train = get_known_stops(train_df)
+            known_stops_test  = get_known_stops(test_df)
+            known_stops_val   = get_known_stops(val_df)
+            # Merge: test → val → train (train wins on conflict)
+            known_stops = {**known_stops_test, **known_stops_val, **known_stops_train}
+            print(f"   Known stops found in data: {len(known_stops)} "
+                  f"(train={len(known_stops_train)}, "
+                  f"test={len(known_stops_test)}, "
+                  f"val={len(known_stops_val)})")
 
             # ------------------------------------------------------------------
             # 2. Clustering  — stations always injected
@@ -131,6 +141,11 @@ def main():
             # ------------------------------------------------------------------
             # 5. Adjacency matrices
             # ------------------------------------------------------------------
+            # Built from training data only. Test/val segments whose segment_id
+            # never appeared in training will be dropped by SegmentDataset —
+            # this is the correct behaviour: the model genuinely has no
+            # learned representation for those routes, and excluding them from
+            # evaluation is an honest reflection of that gap, not a bug.
             adj_geo, adj_dist, adj_soc, segment_types = build_adjacency_matrices_fixed(
                 train_segments, clusters,
                 known_stops=known_stops

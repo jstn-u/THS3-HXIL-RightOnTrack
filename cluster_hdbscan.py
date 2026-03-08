@@ -34,7 +34,7 @@ from config import print_section, haversine_meters
 # HDBSCAN EVENT-DRIVEN CLUSTERING
 # =============================================================================
 
-def event_driven_clustering_fixed(df, known_stops=None):
+def event_driven_clustering_fixed(df, known_stops=None, merge_radius_m=300):
     """
     Event-driven clustering on dwell/slowdown points via HDBSCAN.
 
@@ -47,16 +47,26 @@ def event_driven_clustering_fixed(df, known_stops=None):
 
     After HDBSCAN, the pipeline runs in this order:
       1. HDBSCAN finds delay hotspot candidates from event points.
-      2. Drop any candidate within MERGE_RADIUS_M of a known station
-         (operating on raw HDBSCAN coordinates before any averaging).
+      2. Drop any candidate within merge_radius_m of a known station.
+         Every ABSORBED/KEPT decision is printed with the distance to the
+         nearest station so the caller can tune the radius.
       3. Merge remaining candidates using complete-linkage agglomerative
          clustering (all pairs in a group must be within 50m — prevents
          chain merging that produces centroids far from any real hotspot).
       4. Enforce minimum spacing (300m) between all surviving delay clusters
-         and between delay clusters and stations — prevents short segments
-         that produce near-zero duration training samples.
+         and between delay clusters and stations.  Every SPACING DROP/KEEP
+         decision is printed with the distance to the nearest kept coord.
       5. Assemble final array: stations first (indices 0…n_stations-1),
          delay clusters follow at higher indices.
+
+    Parameters
+    ──────────
+    df            : GPS event DataFrame
+    known_stops   : dict  station_name → (lat, lon)
+    merge_radius_m: int   absorption radius in metres (default 300).
+                    300 = aggressive (matches cluster-assign radius).
+                    200 = moderate.
+                    150 = tight (only immediate platform area).
 
     Returns
     ───────
@@ -127,20 +137,34 @@ def event_driven_clustering_fixed(df, known_stops=None):
         print("   ⚠️  Too few event points for HDBSCAN — only station centres used")
 
     # ------------------------------------------------------------------
-    # 2. Drop delay clusters within MERGE_RADIUS_M of a known station FIRST
+    # 2. Drop delay clusters within merge_radius_m of a known station FIRST
     #    (operates on raw HDBSCAN coordinates before any averaging so the
     #    station absorption decision is made on precise original positions)
+    #    Every decision is printed with the actual distance so the radius
+    #    can be tuned by reviewing the output.
     # ------------------------------------------------------------------
-    MERGE_RADIUS_M = 300   # metres — same as cluster-assign radius
+    MERGE_RADIUS_M = merge_radius_m   # metres — configurable via parameter
 
+    print(f"   Station absorption radius : {MERGE_RADIUS_M}m")
     pre_filtered = []
     for dc in delay_centers:
         too_close = False
-        for (s_lat, s_lon, _) in station_centers:
-            if haversine_meters(dc[0], dc[1], s_lat, s_lon) <= MERGE_RADIUS_M:
+        closest_station = None
+        closest_dist = float('inf')
+        for (s_lat, s_lon, s_name) in station_centers:
+            dist = haversine_meters(dc[0], dc[1], s_lat, s_lon)
+            if dist < closest_dist:
+                closest_dist = dist
+                closest_station = s_name
+            if dist <= MERGE_RADIUS_M:
                 too_close = True
-                break
-        if not too_close:
+
+        if too_close:
+            print(f"     ABSORBED: delay cluster ({dc[0]:.6f}, {dc[1]:.6f}) "
+                  f"→ nearest station '{closest_station}' ({closest_dist:.0f}m)")
+        else:
+            print(f"     KEPT:     delay cluster ({dc[0]:.6f}, {dc[1]:.6f}) "
+                  f"→ nearest station '{closest_station}' ({closest_dist:.0f}m)")
             pre_filtered.append(dc)
 
     dropped_by_station = len(delay_centers) - len(pre_filtered)
@@ -198,6 +222,8 @@ def event_driven_clustering_fixed(df, known_stops=None):
     #    them are too short to produce meaningful duration training samples.
     #    300m matches CLUSTER_ASSIGN_RADIUS_M — closer than this and GPS
     #    points are ambiguous about which cluster they belong to anyway.
+    #    Every decision is printed with the distance to the nearest kept
+    #    coordinate.
     # ------------------------------------------------------------------
     MIN_CLUSTER_SPACING_M = 300
 
@@ -208,11 +234,22 @@ def event_driven_clustering_fixed(df, known_stops=None):
 
     for dc in filtered_delay:
         too_close = False
+        closest_dist = float('inf')
+        closest_coord = None
         for kept_lat, kept_lon in all_kept_coords:
-            if haversine_meters(dc[0], dc[1], kept_lat, kept_lon) < MIN_CLUSTER_SPACING_M:
+            dist = haversine_meters(dc[0], dc[1], kept_lat, kept_lon)
+            if dist < closest_dist:
+                closest_dist = dist
+                closest_coord = (kept_lat, kept_lon)
+            if dist < MIN_CLUSTER_SPACING_M:
                 too_close = True
-                break
-        if not too_close:
+
+        if too_close:
+            print(f"     SPACING DROP: delay cluster ({dc[0]:.6f}, {dc[1]:.6f}) "
+                  f"too close to kept coord ({closest_dist:.0f}m < {MIN_CLUSTER_SPACING_M}m)")
+        else:
+            print(f"     SPACING KEEP: delay cluster ({dc[0]:.6f}, {dc[1]:.6f}) "
+                  f"→ nearest kept ({closest_dist:.0f}m) ✓")
             final_delay.append(dc)
             # Add to kept list so subsequent delay clusters are also checked
             # against this one — enforces spacing between delay clusters too
