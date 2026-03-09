@@ -3,28 +3,22 @@ main.py
 =======
 Entry point for MAGNN-LSTM transit travel time prediction.
 
-HOW TO SWITCH CLUSTERING METHOD
---------------------------------
-Change only the single import line below:
+USAGE
+-----
+    python main.py <sample_fraction> <method>
 
-    from cluster_hdbscan import event_driven_clustering_fixed   # default
-    from cluster_dbscan  import event_driven_clustering_fixed
-    from cluster_knn     import event_driven_clustering_fixed
-    from cluster_gmm     import event_driven_clustering_fixed
-    from cluster_kmeans  import event_driven_clustering_fixed
+    python main.py 0.1 knn
+    python main.py 1.0 dbscan
+    python main.py 0.5 hdbscan
+    python main.py 0.01 gmm
+    python main.py 0.01 kmeans
 
-Everything else — data loading, segment building, model training,
-visualisations, metrics — is identical regardless of method.
+Both arguments are optional and can appear in any order:
+    python main.py              → defaults (sample from config, hdbscan)
+    python main.py 0.1          → 10% sample, hdbscan
+    python main.py knn          → default sample, knn
+    python main.py 0.1 knn      → 10% sample, knn
 """
-
-# =============================================================================
-# CLUSTERING METHOD — change this ONE line to swap methods
-# =============================================================================
-from cluster_hdbscan  import event_driven_clustering_fixed   # ← swap here
-
-# Derived automatically from the module name — never needs manual editing.
-# cluster_hdbscan → HDBSCAN,  cluster_knn → KNN,  cluster_gmm → GMM, etc.
-ALGORITHM_NAME = event_driven_clustering_fixed.__module__.replace('cluster_', '').upper()
 
 # =============================================================================
 # SHARED MODULES
@@ -38,15 +32,21 @@ from visualizations import (plot_clusters, plot_segments,
 from model import (SegmentDataset, masked_collate_fn,
                    train_magtte, SimpleMLP, train_simple)
 
+import importlib
 import numpy as np
 import pandas as pd
 import os
 import json
+import sys
 import warnings
 from datetime import datetime
 from torch.utils.data import DataLoader
 
 warnings.filterwarnings('ignore')
+
+# Valid clustering methods (must match cluster_<name>.py files)
+VALID_METHODS = ['hdbscan', 'dbscan', 'knn', 'gmm', 'kmeans']
+DEFAULT_METHOD = 'hdbscan'
 
 # =============================================================================
 # MAIN PIPELINE
@@ -56,6 +56,30 @@ def main():
     """Main training loop."""
 
     config = Config()
+
+    # ---------------------------------------------------------------------
+    # Parse CLI args — accept sample_fraction and/or method in any order
+    #   python main.py 0.1 knn
+    #   python main.py knn 0.1
+    #   python main.py 0.1
+    #   python main.py knn
+    #   python main.py
+    # ---------------------------------------------------------------------
+    method = DEFAULT_METHOD
+    for arg in sys.argv[1:]:
+        if arg.lower() in VALID_METHODS:
+            method = arg.lower()
+        else:
+            try:
+                config.sample_fraction = float(arg)
+            except ValueError:
+                print(f"⚠️  Unknown argument '{arg}' — ignored")
+                print(f"   Valid methods: {', '.join(VALID_METHODS)}")
+
+    # Dynamic import of the chosen clustering module
+    module = importlib.import_module(f'cluster_{method}')
+    event_driven_clustering_fixed = module.event_driven_clustering_fixed
+    ALGORITHM_NAME = method.upper()
 
     print_section("MAGNN-LSTM TRAINING CONFIGURATION")
     print(f"  Device: {DEVICE}")
