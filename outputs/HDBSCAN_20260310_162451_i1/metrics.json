@@ -1,0 +1,34 @@
+{
+  "graph_method": "hdbscan",
+  "config": {
+    "n_epochs": 50,
+    "batch_size": 64,
+    "learning_rate": 0.001,
+    "sample_fraction": 0.15,
+    "n_clusters": 30,
+    "n_segment_types": 114,
+    "node_embed_dim": 32,
+    "gat_hidden": 32,
+    "lstm_hidden": 64,
+    "historical_dim": 16
+  },
+  "timestamp": "2026-03-10 16:27:34",
+  "Train": {
+    "R2": "0.0794",
+    "RMSE": "34.77 seconds",
+    "MAE": "7.45 seconds",
+    "MAPE": "29.60%"
+  },
+  "Val": {
+    "R2": "0.1180",
+    "RMSE": "16.85 seconds",
+    "MAE": "8.62 seconds",
+    "MAPE": "30.27%"
+  },
+  "Test": {
+    "R2": "0.2286",
+    "RMSE": "7.91 seconds",
+    "MAE": "6.01 seconds",
+    "MAPE": "28.04%"
+  }
+}
