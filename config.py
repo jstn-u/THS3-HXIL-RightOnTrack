@@ -21,7 +21,6 @@ import matplotlib
 matplotlib.use('Agg')  # non-interactive backend — safe for all environments
 import matplotlib.pyplot as plt
 import matplotlib.patches as mpatches
-import contextlib as ctx
 
 import torch
 import torch.nn as nn
@@ -64,25 +63,26 @@ class Config:
     # =========================================================================
     data_folder = './data'
 
-    sample_fraction = 0.01
+    sample_fraction = 0.15
     """
     SAMPLE_FRACTION: What percentage of data to use
-    - 0.1 = 10% of trips (FAST - for testing/debugging)
-    - 0.5 = 50% of trips (MEDIUM - for initial experiments)
-    - 1.0 = 100% of trips (SLOW - for final production model)
+    - 0.01 = 1% of trips (ULTRA-FAST - for quick smoke tests)
+    - 0.1  = 10% of trips (FAST - for testing/debugging)
+    - 0.15 = 15% of trips (RECOMMENDED - good balance for development)
+    - 0.5  = 50% of trips (MEDIUM - for initial experiments)
+    - 1.0  = 100% of trips (SLOW - for final production model)
 
-    Example: If you have 1000 trips, 0.1 uses 100 random trips
+    Example: If you have 1000 trips, 0.15 uses 150 random trips
     """
 
     # =========================================================================
     # ITERATION PARAMETERS
     # =========================================================================
     n_iterations = 1
-    # For quick testing keep this at 1. Increase for production runs.
     """
     N_ITERATIONS: How many complete training runs to perform
-    - 1 = Single run (RECOMMENDED for testing)
-    - 5 = Multiple runs for averaging results
+    - 1  = Single run (RECOMMENDED for testing)
+    - 5  = Multiple runs for averaging results
     - 50 = Full experiment with different random samples
 
     Why multiple iterations?
@@ -96,7 +96,7 @@ class Config:
     # =========================================================================
     # TRAINING PARAMETERS
     # =========================================================================
-    n_epochs = 50          # keep low for quick testing; raise to 50+ for production
+    n_epochs = 50          # keep low (10-20) for quick testing; raise to 50+ for production
     batch_size = 64        # larger batch = fewer iterations per epoch = faster
     learning_rate = 0.001
     dropout = 0.3
@@ -106,7 +106,7 @@ class Config:
     lr_scheduler_factor = 0.5
 
     # =========================================================================
-    # MODEL ARCHITECTURE PARAMETERS  (smaller = faster, sufficient for testing)
+    # MODEL ARCHITECTURE PARAMETERS (smaller = faster, sufficient for testing)
     # =========================================================================
     n_heads = 3            # FIXED — one per adjacency matrix (geo, dist, social)
     node_embed_dim = 32    # node embedding size fed into GAT  (was 64)
@@ -127,8 +127,8 @@ class Config:
     AttentionTTE paper uses 0.5 for balanced learning
     """
 
-    mtl_segment_hidden = 64    # Hidden units in segment predictor
-    mtl_path_hidden = 128      # Hidden units in path predictor
+    mtl_segment_hidden = 64    # Hidden units in individual segment predictor
+    mtl_path_hidden = 128      # Hidden units in collective path predictor
 
 
 # Create config instance
@@ -147,10 +147,19 @@ def print_section(title):
 
 
 def haversine_meters(lat1, lon1, lat2, lon2):
-    """Calculate great circle distance in meters."""
+    """
+    Calculate great circle distance in meters between two GPS coordinates.
+
+    Args:
+        lat1, lon1: First point (degrees)
+        lat2, lon2: Second point (degrees)
+
+    Returns:
+        Distance in meters
+    """
     lat1, lon1, lat2, lon2 = map(radians, [lat1, lon1, lat2, lon2])
     dlat = lat2 - lat1
     dlon = lon2 - lon1
     a = sin(dlat / 2) ** 2 + cos(lat1) * cos(lat2) * sin(dlon / 2) ** 2
     c = 2 * asin(sqrt(a))
-    return c * 6371000
+    return c * 6371000  # Earth radius in meters

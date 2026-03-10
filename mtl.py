@@ -127,6 +127,8 @@ class PathPredictor(nn.Module):
 # MULTI-TASK LEARNING HEAD
 # =============================================================================
 
+# Replace the MTLHead class (around line 113):
+
 class MTLHead(nn.Module):
     """
     Complete Multi-Task Learning module combining:
@@ -142,10 +144,11 @@ class MTLHead(nn.Module):
         self.l2_attention = L2NormAttention()
         self.path_predictor = PathPredictor(feature_dim, path_hidden, dropout)
 
-    def forward(self, segment_features, return_components=False):
+    def forward(self, segment_features, mask=None, return_components=False):  # ✅ ADDED mask
         """
         Args:
             segment_features: [batch, seq_len, feature_dim] - features for all segments
+            mask: [batch, seq_len] - binary mask (1 = valid, 0 = padding)
             return_components: if True, return individual predictions and weights
 
         Returns:
@@ -157,25 +160,30 @@ class MTLHead(nn.Module):
         batch_size, seq_len, feature_dim = segment_features.size()
 
         # Task 1: Individual segment predictions
-        # Reshape to process all segments at once
-        segments_flat = segment_features.view(-1, feature_dim)  # [batch*seq_len, feature_dim]
-        individual_preds_flat = self.segment_predictor(segments_flat)  # [batch*seq_len, 1]
-        individual_preds = individual_preds_flat.view(batch_size, seq_len, 1)  # [batch, seq_len, 1]
+        segments_flat = segment_features.view(-1, feature_dim)
+        individual_preds_flat = self.segment_predictor(segments_flat)
+        individual_preds = individual_preds_flat.view(batch_size, seq_len, 1)
 
         # Calculate L2-norm attention weights
         attention_weights = self.l2_attention(segment_features)  # [batch, seq_len]
 
-        # Task 2: Collective path prediction
-        # Weighted sum of segment features
-        weighted_features = segment_features * attention_weights.unsqueeze(2)  # [batch, seq_len, feature_dim]
-        global_feature = weighted_features.sum(dim=1)  # [batch, feature_dim]
+        # ✅ FIXED: Apply mask to attention weights
+        if mask is not None:
+            attention_weights = attention_weights * mask.float()
+            # Re-normalize after masking
+            attention_weights = attention_weights / (attention_weights.sum(dim=1, keepdim=True) + 1e-8)
 
-        path_prediction = self.path_predictor(global_feature)  # [batch, 1]
+        # Task 2: Collective path prediction
+        weighted_features = segment_features * attention_weights.unsqueeze(2)
+        global_feature = weighted_features.sum(dim=1)
+
+        path_prediction = self.path_predictor(global_feature)
 
         if return_components:
             return individual_preds, path_prediction, attention_weights
         else:
             return path_prediction
+
 
 
 # =============================================================================
@@ -198,21 +206,29 @@ class MTLLoss(nn.Module):
         self.lambda_weight = lambda_weight
         self.criterion = criterion if criterion is not None else nn.SmoothL1Loss()
 
-    def forward(self, individual_preds, path_pred, target):
+    def forward(self, individual_preds, path_pred, target, mask=None):  # ✅ ADDED mask parameter
         """
         Args:
             individual_preds: [batch, seq_len, 1] - predictions for each segment
             path_pred: [batch, 1] - prediction for entire path
             target: [batch, 1] - ground truth total travel time
+            mask: [batch, seq_len] - binary mask (1 = valid, 0 = padding)
 
         Returns:
             total_loss: Combined MTL loss
             loss_dict: Dictionary with individual and collective losses (for logging)
         """
-        # Individual loss: compare each segment prediction to target
-        # Note: In practice, individual targets would be segment-level times
-        # Here we use the total time as a proxy (segments should sum to total)
-        individual_loss = self.criterion(individual_preds.sum(dim=1), target)
+        # ✅ FIXED: Apply mask to individual predictions before summing
+        if mask is not None:
+            # Only sum valid (non-padded) segments
+            masked_individual = individual_preds * mask.unsqueeze(2).float()
+            individual_sum = masked_individual.sum(dim=1)
+        else:
+            # Fallback: sum all segments if no mask provided
+            individual_sum = individual_preds.sum(dim=1)
+
+        # Individual loss: compare sum of segment predictions to target
+        individual_loss = self.criterion(individual_sum, target)
 
         # Collective loss: compare path prediction to target
         collective_loss = self.criterion(path_pred, target)
@@ -227,7 +243,6 @@ class MTLLoss(nn.Module):
         }
 
         return total_loss, loss_dict
-
 
 # =============================================================================
 # HELPER: SEGMENT FEATURE EXTRACTION

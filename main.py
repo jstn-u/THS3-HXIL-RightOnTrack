@@ -7,18 +7,29 @@ Usage:
     python main.py                  # Train MAGNN only (baseline)
     python main.py --compare        # Compare MAGNN vs MAGNN-LSTM
     python main.py --compare-all    # Compare MAGNN vs MAGNN-LSTM vs MAGNN-LSTM-MTL
+    python main.py --ablation       # for feature ablation studies
 
-FIXED FOR MAGNN-LSTM-MTL:
-- Three-way comparison with Multi-Task Learning
-- MTL uses lambda=0.5 for balanced individual/collective learning
-- All models use identical data splits for fair comparison
+HOW TO SWITCH CLUSTERING METHOD
+--------------------------------
+Change only the single import line below:
+
+    from cluster_hdbscan import event_driven_clustering_fixed   # default
+    from cluster_dbscan  import event_driven_clustering_fixed
+    from cluster_knn     import event_driven_clustering_fixed
+    from cluster_gmm     import event_driven_clustering_fixed
+    from cluster_kmeans  import event_driven_clustering_fixed
+
+Everything else — data loading, segment building, model training,
+visualisations, metrics — is identical regardless of method.
 """
 
 # =============================================================================
-# CLUSTERING METHOD
+# CLUSTERING METHOD — change this ONE line to swap methods
 # =============================================================================
-from cluster_dbscan import event_driven_clustering_fixed
+from cluster_hdbscan import event_driven_clustering_fixed   # ← swap here
 
+# Derived automatically from the module name — never needs manual editing.
+# cluster_hdbscan → HDBSCAN,  cluster_knn → KNN,  cluster_gmm → GMM, etc.
 ALGORITHM_NAME = event_driven_clustering_fixed.__module__.replace('cluster_', '').upper()
 
 # =============================================================================
@@ -27,12 +38,14 @@ ALGORITHM_NAME = event_driven_clustering_fixed.__module__.replace('cluster_', ''
 from config import Config, DEVICE, print_section, haversine_meters
 from data_loader import (load_data_fixed, load_train_test_val_data_fixed,
                          get_known_stops)
-from segments import build_segments_fixed, build_adjacency_matrices_fixed
+from segments import (build_segments_fixed, build_adjacency_matrices_fixed,
+                      aggregate_segments_into_paths)
 from visualizations import (plot_clusters, plot_segments,
                             plot_segment_statistics)
 from model import (SegmentDataset, masked_collate_fn,
                    train_magtte, SimpleMLP, train_simple,
                    EnhancedSegmentDataset, enhanced_collate_fn,
+                   PathDataset, path_collate_fn,
                    train_magnn_lstm, train_magnn_lstm_mtl)
 
 import numpy as np
@@ -74,6 +87,9 @@ def main():
         print(f"📁 Output: {output_folder}")
 
         try:
+            # ------------------------------------------------------------------
+            # 1. Load data
+            # ------------------------------------------------------------------
             train_df, test_df, val_df = load_train_test_val_data_fixed(
                 data_folder=config.data_folder,
                 sample_fraction=config.sample_fraction
@@ -83,9 +99,20 @@ def main():
                 print("❌ No training data")
                 continue
 
-            known_stops = get_known_stops(train_df)
-            print(f"   Known stops found in data: {len(known_stops)}")
+            # Extract known named stops from ALL splits
+            known_stops_train = get_known_stops(train_df)
+            known_stops_test = get_known_stops(test_df)
+            known_stops_val = get_known_stops(val_df)
+            # Merge: test → val → train (train wins on conflict)
+            known_stops = {**known_stops_test, **known_stops_val, **known_stops_train}
+            print(f"   Known stops found in data: {len(known_stops)} "
+                  f"(train={len(known_stops_train)}, "
+                  f"test={len(known_stops_test)}, "
+                  f"val={len(known_stops_val)})")
 
+            # ------------------------------------------------------------------
+            # 2. Clustering — stations always injected
+            # ------------------------------------------------------------------
             clusters, station_cluster_ids = event_driven_clustering_fixed(
                 train_df, known_stops=known_stops
             )
@@ -93,6 +120,9 @@ def main():
                 print("❌ No clusters")
                 continue
 
+            # ------------------------------------------------------------------
+            # 3. Build segments
+            # ------------------------------------------------------------------
             train_segments = build_segments_fixed(train_df, clusters)
             if len(train_segments) == 0:
                 print("❌ No segments")
@@ -101,6 +131,9 @@ def main():
             test_segments = build_segments_fixed(test_df, clusters)
             val_segments = build_segments_fixed(val_df, clusters)
 
+            # ------------------------------------------------------------------
+            # 4. PLOTS — generated before training
+            # ------------------------------------------------------------------
             print_section("GENERATING VISUALISATIONS")
 
             plot_clusters(clusters, {},
@@ -114,14 +147,21 @@ def main():
                                     save_path=os.path.join(output_folder,
                                                            f'{ALGORITHM_NAME.lower()}-segment_stats.png'))
 
+            # ------------------------------------------------------------------
+            # 5. Adjacency matrices
+            # ------------------------------------------------------------------
             adj_geo, adj_dist, adj_soc, segment_types = build_adjacency_matrices_fixed(
-                train_segments, clusters
+                train_segments, clusters,
+                known_stops=known_stops
             )
 
             if adj_geo is None:
                 print("❌ Adjacency failed")
                 continue
 
+            # ------------------------------------------------------------------
+            # 6. Datasets & data loaders
+            # ------------------------------------------------------------------
             train_dataset = SegmentDataset(
                 train_segments, segment_types,
                 fit_scalers=True
@@ -167,6 +207,9 @@ def main():
                 print("❌ Training loader is empty — skipping")
                 continue
 
+            # ------------------------------------------------------------------
+            # 7. MAGTTE + GAT training
+            # ------------------------------------------------------------------
             results, _ = train_magtte(
                 train_loader, val_loader, test_loader,
                 adj_geo, adj_dist, adj_soc,
@@ -174,6 +217,9 @@ def main():
                 output_folder, DEVICE, config
             )
 
+            # ------------------------------------------------------------------
+            # 8. Save metrics JSON
+            # ------------------------------------------------------------------
             metrics_out = {
                 'graph_method': ALGORITHM_NAME.lower(),
                 'config': {
@@ -282,7 +328,8 @@ def print_three_way_comparison_table(magnn_results, lstm_results, mtl_results, s
     print(f"\n{'=' * 120}")
     print(f"{split_name.upper()} SET - THREE-WAY COMPARISON")
     print(f"{'=' * 120}")
-    print(f"{'Metric':<10} {'MAGNN':<15} {'MAGNN-LSTM':<15} {'MAGNN-LSTM-MTL':<18} {'Best Model':<20} {'Improvement':<15}")
+    print(
+        f"{'Metric':<10} {'MAGNN':<15} {'MAGNN-LSTM':<15} {'MAGNN-LSTM-MTL':<18} {'Best Model':<20} {'Improvement':<15}")
     print(f"{'-' * 120}")
 
     metrics_info = [
@@ -341,13 +388,14 @@ def print_three_way_comparison_table(magnn_results, lstm_results, mtl_results, s
             best_model = "N/A"
             improvement_str = "N/A"
 
-        print(f"{display_name:<10} {magnn_str:<15} {lstm_str:<15} {mtl_str:<18} {best_model:<20} {improvement_str:<15}")
+        print(
+            f"{display_name:<10} {magnn_str:<15} {lstm_str:<15} {mtl_str:<18} {best_model:<20} {improvement_str:<15}")
 
     print(f"{'=' * 120}\n")
 
 
 # =============================================================================
-# THREE-WAY COMPARISON MODE
+# THREE-WAY COMPARISON MODE (WITH MTL)
 # =============================================================================
 
 def main_with_three_way_comparison():
@@ -363,10 +411,11 @@ def main_with_three_way_comparison():
     print(f"  Epochs per iteration: {config.n_epochs}")
     print(f"\n  Models to compare:")
     print(f"    1. MAGNN (baseline) - Graph attention + LSTM")
-    print(f"    2. MAGNN-LSTM - Add operational + weather features")
-    print(f"    3. MAGNN-LSTM-MTL - Add Multi-Task Learning")
-    print(f"       • Individual segment predictions (local accuracy)")
-    print(f"       • Collective path predictions (global patterns)")
+    print(f"    2. MAGNN-LSTM - Add operational + weather features (single segments)")
+    print(f"    3. MAGNN-LSTM-MTL - Multi-segment paths with MTL")
+    print(f"       • Aggregates consecutive segments by trip_id into paths")
+    print(f"       • Task 1: Individual segment predictions (local accuracy)")
+    print(f"       • Task 2: Collective path predictions (global patterns)")
     print(f"       • L2-norm attention weighting")
     print(f"       • MTL lambda = {config.mtl_lambda}")
     print("=" * 80)
@@ -384,7 +433,7 @@ def main_with_three_way_comparison():
         print(f"📁 Output: {output_folder}")
 
         try:
-            print("\n[1/11] Loading data...")
+            print("\n[1/12] Loading data...")
             train_df, test_df, val_df = load_train_test_val_data_fixed(
                 data_folder=config.data_folder,
                 sample_fraction=config.sample_fraction
@@ -394,10 +443,15 @@ def main_with_three_way_comparison():
                 print("❌ No training data")
                 continue
 
-            known_stops = get_known_stops(train_df)
+            # Extract known stops from ALL splits
+            known_stops_train = get_known_stops(train_df)
+            known_stops_test = get_known_stops(test_df)
+            known_stops_val = get_known_stops(val_df)
+            known_stops = {**known_stops_test, **known_stops_val, **known_stops_train}
             print(f"      ✓ Train: {len(train_df):,} | Val: {len(val_df):,} | Test: {len(test_df):,}")
+            print(f"      ✓ Known stops: {len(known_stops)}")
 
-            print("[2/11] Clustering stops...")
+            print("[2/12] Clustering stops...")
             clusters, station_cluster_ids = event_driven_clustering_fixed(
                 train_df, known_stops=known_stops
             )
@@ -406,7 +460,7 @@ def main_with_three_way_comparison():
                 continue
             print(f"      ✓ {len(clusters)} clusters created")
 
-            print("[3/11] Building segments...")
+            print("[3/12] Building segments...")
             train_segments = build_segments_fixed(train_df, clusters)
             test_segments = build_segments_fixed(test_df, clusters)
             val_segments = build_segments_fixed(val_df, clusters)
@@ -416,9 +470,10 @@ def main_with_three_way_comparison():
                 continue
             print(f"      ✓ {len(train_segments):,} training segments")
 
-            print("[4/11] Building adjacency matrices...")
+            print("[4/12] Building adjacency matrices...")
             adj_geo, adj_dist, adj_soc, segment_types = build_adjacency_matrices_fixed(
-                train_segments, clusters
+                train_segments, clusters,
+                known_stops=known_stops
             )
 
             if adj_geo is None:
@@ -426,7 +481,7 @@ def main_with_three_way_comparison():
                 continue
             print(f"      ✓ 3 adjacency matrices (geo, dist, social)")
 
-            print("[5/11] Preparing MAGNN datasets...")
+            print("[5/12] Preparing MAGNN datasets...")
 
             train_dataset_magnn = SegmentDataset(
                 train_segments, segment_types, fit_scalers=True
@@ -457,7 +512,7 @@ def main_with_three_way_comparison():
 
             print(f"      ✓ MAGNN: {len(train_dataset_magnn):,} samples")
 
-            print("[6/11] Preparing MAGNN-LSTM & MTL datasets...")
+            print("[6/12] Preparing MAGNN-LSTM datasets (single segments)...")
 
             train_dataset_lstm = EnhancedSegmentDataset(
                 train_segments, segment_types, fit_scalers=True
@@ -491,9 +546,52 @@ def main_with_three_way_comparison():
                 shuffle=False, num_workers=0, collate_fn=enhanced_collate_fn
             )
 
-            print(f"      ✓ LSTM & MTL: {len(train_dataset_lstm):,} samples")
+            print(f"      ✓ MAGNN-LSTM: {len(train_dataset_lstm):,} samples (single segments)")
 
-            print("\n[7/11] Training MAGNN (baseline)...")
+            # NEW: Aggregate paths for MTL
+            print("[7/12] Aggregating segments into multi-segment paths for MTL...")
+            train_paths = aggregate_segments_into_paths(train_segments, max_path_length=10)
+            val_paths = aggregate_segments_into_paths(val_segments, max_path_length=10)
+            test_paths = aggregate_segments_into_paths(test_segments, max_path_length=10)
+
+            if len(train_paths) == 0:
+                print("❌ No paths created - skipping MTL")
+                continue
+
+            train_dataset_mtl = PathDataset(
+                train_paths, segment_types, max_path_length=10, fit_scalers=True
+            )
+            val_dataset_mtl = PathDataset(
+                val_paths, segment_types, max_path_length=10, fit_scalers=False,
+                target_scaler=train_dataset_mtl.target_scaler,
+                speed_scaler=train_dataset_mtl.speed_scaler,
+                operational_scaler=train_dataset_mtl.operational_scaler,
+                weather_scaler=train_dataset_mtl.weather_scaler,
+            )
+            test_dataset_mtl = PathDataset(
+                test_paths, segment_types, max_path_length=10, fit_scalers=False,
+                target_scaler=train_dataset_mtl.target_scaler,
+                speed_scaler=train_dataset_mtl.speed_scaler,
+                operational_scaler=train_dataset_mtl.operational_scaler,
+                weather_scaler=train_dataset_mtl.weather_scaler,
+            )
+
+            train_loader_mtl = DataLoader(
+                train_dataset_mtl, batch_size=config.batch_size,
+                shuffle=True, num_workers=0, collate_fn=path_collate_fn
+            )
+            val_loader_mtl = DataLoader(
+                val_dataset_mtl, batch_size=config.batch_size,
+                shuffle=False, num_workers=0, collate_fn=path_collate_fn
+            )
+            test_loader_mtl = DataLoader(
+                test_dataset_mtl, batch_size=config.batch_size,
+                shuffle=False, num_workers=0, collate_fn=path_collate_fn
+            )
+
+            print(f"      ✓ MTL: {len(train_dataset_mtl):,} paths (multi-segment)")
+
+            print("\n[8/12] Training MAGNN (baseline)...")
             print("-" * 80)
 
             magnn_results, magnn_model = train_magtte(
@@ -505,7 +603,7 @@ def main_with_three_way_comparison():
 
             all_magnn_results.append(magnn_results)
 
-            print("\n[8/11] Training MAGNN-LSTM...")
+            print("\n[9/12] Training MAGNN-LSTM (single segments)...")
             print("-" * 80)
 
             magnn_checkpoint = os.path.join(output_folder, 'magtte_best.pth')
@@ -521,13 +619,13 @@ def main_with_three_way_comparison():
 
             all_lstm_results.append(lstm_results)
 
-            print("\n[9/11] Training MAGNN-LSTM-MTL (Multi-Task Learning)...")
+            print("\n[10/12] Training MAGNN-LSTM-MTL (multi-segment paths)...")
             print("-" * 80)
 
             mtl_results, mtl_model = train_magnn_lstm_mtl(
-                train_loader_lstm, val_loader_lstm, test_loader_lstm,
+                train_loader_mtl, val_loader_mtl, test_loader_mtl,
                 adj_geo, adj_dist, adj_soc,
-                segment_types, train_dataset_lstm.target_scaler,
+                segment_types, train_dataset_mtl.target_scaler,
                 output_folder, DEVICE, config,
                 pretrained_magnn_path=magnn_checkpoint,
                 freeze_magnn=True
@@ -535,13 +633,13 @@ def main_with_three_way_comparison():
 
             all_mtl_results.append(mtl_results)
 
-            print("\n[10/11] Generating comparison report...")
+            print("\n[11/12] Generating comparison report...")
             print_section(f"📊 ITERATION {iteration} - THREE-WAY COMPARISON")
 
             for split in ['Train', 'Val', 'Test']:
                 print_three_way_comparison_table(magnn_results, lstm_results, mtl_results, split)
 
-            print("[11/11] Saving comparison metrics...")
+            print("[12/12] Saving comparison metrics...")
 
             comparison_data = []
             for split in ['Train', 'Val', 'Test']:
@@ -581,6 +679,12 @@ def main_with_three_way_comparison():
                     'learning_rate': config.learning_rate,
                     'sample_fraction': config.sample_fraction,
                     'mtl_lambda': config.mtl_lambda,
+                    'max_path_length': 10,
+                },
+                'data_summary': {
+                    'magnn_samples': len(train_dataset_magnn),
+                    'lstm_samples': len(train_dataset_lstm),
+                    'mtl_paths': len(train_dataset_mtl),
                 },
                 'magnn': {
                     split: {k: float(v) if isinstance(v, (int, float, np.number)) else str(v)
@@ -689,11 +793,12 @@ def main_with_three_way_comparison():
         print(f"  Total iterations: {len(all_magnn_results)}")
         print(f"  All models trained on identical data splits")
         print(f"\n  Model Details:")
-        print(f"    MAGNN: Graph attention + LSTM baseline")
-        print(f"    MAGNN-LSTM: + operational + weather features")
-        print(f"    MAGNN-LSTM-MTL: + Multi-Task Learning (λ={config.mtl_lambda})")
-        print(f"      • Individual segment predictions")
-        print(f"      • Collective path predictions")
+        print(f"    MAGNN: Graph attention + LSTM baseline (single segments)")
+        print(f"    MAGNN-LSTM: + operational + weather features (single segments)")
+        print(f"    MAGNN-LSTM-MTL: Multi-segment paths with MTL (λ={config.mtl_lambda})")
+        print(f"      • Paths aggregated by trip_id")
+        print(f"      • Task 1: Individual segment predictions")
+        print(f"      • Task 2: Collective path predictions")
         print(f"      • L2-norm attention weighting")
         print(f"\n  Results saved in: outputs/{ALGORITHM_NAME}_*_three_way/")
         print("=" * 80)
@@ -741,7 +846,10 @@ def main_with_lstm_comparison():
                 print("❌ No training data")
                 continue
 
-            known_stops = get_known_stops(train_df)
+            known_stops_train = get_known_stops(train_df)
+            known_stops_test = get_known_stops(test_df)
+            known_stops_val = get_known_stops(val_df)
+            known_stops = {**known_stops_test, **known_stops_val, **known_stops_train}
             print(f"      ✓ Train: {len(train_df):,} | Val: {len(val_df):,} | Test: {len(test_df):,}")
 
             print("[2/9] Clustering stops...")
@@ -765,7 +873,8 @@ def main_with_lstm_comparison():
 
             print("[4/9] Building adjacency matrices...")
             adj_geo, adj_dist, adj_soc, segment_types = build_adjacency_matrices_fixed(
-                train_segments, clusters
+                train_segments, clusters,
+                known_stops=known_stops
             )
 
             if adj_geo is None:
@@ -882,6 +991,273 @@ def main_with_lstm_comparison():
 
 
 # =============================================================================
+# ABLATION STUDY MODE
+# =============================================================================
+
+def main_with_ablation_study():
+    """Ablation study: Feature importance analysis."""
+
+    config = Config()
+
+    print_section("🔬 ABLATION STUDY MODE")
+    print(f"  Device: {DEVICE}")
+    print(f"  Algorithm: {ALGORITHM_NAME}")
+    print(f"  Data sampling: {config.sample_fraction * 100}%")
+    print(f"\n  Models to compare:")
+    print(f"    1. MAGNN-LSTM-MTL (Full) - All features")
+    print(f"    2. MAGNN-LSTM-MTL (No Operational) - Remove delay features")
+    print(f"    3. MAGNN-LSTM-MTL (No Weather) - Remove weather features")
+    print(f"    4. MAGNN-LSTM-MTL (Baseline) - Only spatial + temporal")
+    print("=" * 80)
+
+    all_full_results = []
+    all_no_op_results = []
+    all_no_weather_results = []
+    all_baseline_results = []
+
+    for iteration in range(1, config.n_iterations + 1):
+        print_section(f"🔄 ITERATION {iteration}/{config.n_iterations}")
+
+        timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+        output_folder = f"outputs/{ALGORITHM_NAME}_{timestamp}_i{iteration}_ablation"
+        os.makedirs(output_folder, exist_ok=True)
+        print(f"📁 Output: {output_folder}")
+
+        try:
+            # Load data
+            print("\n[1/8] Loading data...")
+            train_df, test_df, val_df = load_train_test_val_data_fixed(
+                data_folder=config.data_folder,
+                sample_fraction=config.sample_fraction
+            )
+
+            if len(train_df) == 0:
+                print("❌ No training data")
+                continue
+
+            known_stops_train = get_known_stops(train_df)
+            known_stops_test = get_known_stops(test_df)
+            known_stops_val = get_known_stops(val_df)
+            known_stops = {**known_stops_test, **known_stops_val, **known_stops_train}
+            print(f"      ✓ Known stops: {len(known_stops)}")
+
+            print("[2/8] Clustering stops...")
+            clusters, station_cluster_ids = event_driven_clustering_fixed(
+                train_df, known_stops=known_stops
+            )
+            if len(clusters) == 0:
+                print("❌ No clusters")
+                continue
+            print(f"      ✓ {len(clusters)} clusters created")
+
+            print("[3/8] Building segments...")
+            train_segments = build_segments_fixed(train_df, clusters)
+            test_segments = build_segments_fixed(test_df, clusters)
+            val_segments = build_segments_fixed(val_df, clusters)
+
+            if len(train_segments) == 0:
+                print("❌ No segments")
+                continue
+
+            print("[4/8] Building adjacency matrices...")
+            adj_geo, adj_dist, adj_soc, segment_types = build_adjacency_matrices_fixed(
+                train_segments, clusters, known_stops=known_stops
+            )
+
+            if adj_geo is None:
+                print("❌ Adjacency failed")
+                continue
+
+            print("[5/8] Aggregating paths...")
+            train_paths = aggregate_segments_into_paths(train_segments, max_path_length=10)
+            val_paths = aggregate_segments_into_paths(val_segments, max_path_length=10)
+            test_paths = aggregate_segments_into_paths(test_segments, max_path_length=10)
+
+            if len(train_paths) == 0:
+                print("❌ No paths created")
+                continue
+
+            # Train baseline MAGNN first (needed for all variants)
+            print("\n[6/8] Training baseline MAGNN (for transfer learning)...")
+            train_dataset_magnn = SegmentDataset(train_segments, segment_types, fit_scalers=True)
+            val_dataset_magnn = SegmentDataset(val_segments, segment_types, fit_scalers=False,
+                                               target_scaler=train_dataset_magnn.target_scaler,
+                                               speed_scaler=train_dataset_magnn.speed_scaler)
+            test_dataset_magnn = SegmentDataset(test_segments, segment_types, fit_scalers=False,
+                                                target_scaler=train_dataset_magnn.target_scaler,
+                                                speed_scaler=train_dataset_magnn.speed_scaler)
+
+            train_loader_magnn = DataLoader(train_dataset_magnn, batch_size=config.batch_size,
+                                            shuffle=True, num_workers=0, collate_fn=masked_collate_fn)
+            val_loader_magnn = DataLoader(val_dataset_magnn, batch_size=config.batch_size,
+                                          shuffle=False, num_workers=0, collate_fn=masked_collate_fn)
+            test_loader_magnn = DataLoader(test_dataset_magnn, batch_size=config.batch_size,
+                                           shuffle=False, num_workers=0, collate_fn=masked_collate_fn)
+
+            magnn_results, magnn_model = train_magtte(
+                train_loader_magnn, val_loader_magnn, test_loader_magnn,
+                adj_geo, adj_dist, adj_soc,
+                segment_types, train_dataset_magnn.target_scaler,
+                output_folder, DEVICE, config
+            )
+
+            magnn_checkpoint = os.path.join(output_folder, 'magtte_best.pth')
+
+            print("\n[7/8] Training ablation variants...")
+
+            ablation_configs = [
+                ("Full", True, True, "All features"),
+                ("No Operational", False, True, "Spatial + Temporal + Weather"),
+                ("No Weather", True, False, "Spatial + Temporal + Operational"),
+                ("Baseline", False, False, "Spatial + Temporal only"),
+            ]
+
+            all_results = []
+
+            for variant_name, use_op, use_weather, desc in ablation_configs:
+                print(f"\n   Training: {variant_name} ({desc})")
+
+                # Create datasets
+                train_data = PathDataset(
+                    train_paths, segment_types, max_path_length=10, fit_scalers=True,
+                    use_operational=use_op, use_weather=use_weather
+                )
+                val_data = PathDataset(
+                    val_paths, segment_types, max_path_length=10, fit_scalers=False,
+                    target_scaler=train_data.target_scaler,
+                    speed_scaler=train_data.speed_scaler,
+                    operational_scaler=train_data.operational_scaler,
+                    weather_scaler=train_data.weather_scaler,
+                    use_operational=use_op, use_weather=use_weather
+                )
+                test_data = PathDataset(
+                    test_paths, segment_types, max_path_length=10, fit_scalers=False,
+                    target_scaler=train_data.target_scaler,
+                    speed_scaler=train_data.speed_scaler,
+                    operational_scaler=train_data.operational_scaler,
+                    weather_scaler=train_data.weather_scaler,
+                    use_operational=use_op, use_weather=use_weather
+                )
+
+                train_loader = DataLoader(train_data, batch_size=config.batch_size,
+                                          shuffle=True, num_workers=0, collate_fn=path_collate_fn)
+                val_loader = DataLoader(val_data, batch_size=config.batch_size,
+                                        shuffle=False, num_workers=0, collate_fn=path_collate_fn)
+                test_loader = DataLoader(test_data, batch_size=config.batch_size,
+                                         shuffle=False, num_workers=0, collate_fn=path_collate_fn)
+
+                # Train
+                results, model = train_magnn_lstm_mtl(
+                    train_loader, val_loader, test_loader,
+                    adj_geo, adj_dist, adj_soc,
+                    segment_types, train_data.target_scaler,
+                    output_folder, DEVICE, config,
+                    pretrained_magnn_path=magnn_checkpoint,
+                    freeze_magnn=True
+                )
+
+                all_results.append((variant_name, results))
+
+            print("\n[8/8] Generating ablation comparison...")
+            print_section(f"📊 ITERATION {iteration} - ABLATION STUDY")
+
+            # Print comparison table
+            for split in ['Train', 'Val', 'Test']:
+                print(f"\n{'=' * 140}")
+                print(f"{split.upper()} SET - ABLATION STUDY")
+                print(f"{'=' * 140}")
+                print(
+                    f"{'Metric':<10} {'Full':<15} {'No Operational':<18} {'No Weather':<18} {'Baseline':<18} {'Best':<15}")
+                print(f"{'-' * 140}")
+
+                metrics_info = [
+                    ('R²', 'r2', True),
+                    ('RMSE', 'rmse', False),
+                    ('MAE', 'mae', False),
+                    ('MAPE', 'mape', False),
+                ]
+
+                for display_name, metric_key, higher_is_better in metrics_info:
+                    values = []
+                    for variant_name, results in all_results:
+                        val = results.get(split, {}).get(metric_key, float('nan'))
+                        values.append((variant_name, val))
+
+                    # Format values
+                    formatted = []
+                    for name, val in values:
+                        if metric_key in ['rmse', 'mae']:
+                            formatted.append(f"{val:.2f}s")
+                        elif metric_key == 'mape':
+                            formatted.append(f"{val:.2f}%")
+                        else:
+                            formatted.append(f"{val:.4f}")
+
+                    # Determine best
+                    numeric_vals = [v for _, v in values if not np.isnan(v)]
+                    if numeric_vals:
+                        if higher_is_better:
+                            best_val = max(numeric_vals)
+                        else:
+                            best_val = min(numeric_vals)
+
+                        best_name = [name for name, v in values if v == best_val][0]
+                        best_str = f"{best_name} ✓"
+                    else:
+                        best_str = "N/A"
+
+                    print(
+                        f"{display_name:<10} {formatted[0]:<15} {formatted[1]:<18} {formatted[2]:<18} {formatted[3]:<18} {best_str:<15}")
+
+                print(f"{'=' * 140}\n")
+
+            # Store results
+            all_full_results.append(all_results[0][1])
+            all_no_op_results.append(all_results[1][1])
+            all_no_weather_results.append(all_results[2][1])
+            all_baseline_results.append(all_results[3][1])
+
+            # Save JSON
+            ablation_json = {
+                'iteration': iteration,
+                'algorithm': ALGORITHM_NAME,
+                'config': {
+                    'n_epochs': config.n_epochs,
+                    'batch_size': config.batch_size,
+                    'mtl_lambda': config.mtl_lambda,
+                },
+                'variants': {
+                    name: {
+                        split: {k: float(v) if isinstance(v, (int, float, np.number)) else str(v)
+                                for k, v in results.get(split, {}).items()
+                                if k in ['r2', 'rmse', 'mae', 'mape']}
+                        for split in ['Train', 'Val', 'Test']
+                    }
+                    for name, results in all_results
+                }
+            }
+
+            json_path = os.path.join(output_folder, 'ablation_study.json')
+            with open(json_path, 'w') as f:
+                json.dump(ablation_json, f, indent=2)
+            print(f"✓ Ablation results saved → {json_path}\n")
+
+        except Exception as e:
+            print(f"\n❌ Error in iteration {iteration}: {e}")
+            import traceback
+            traceback.print_exc()
+            continue
+
+    print_section("✅ ABLATION STUDY COMPLETE")
+    print(f"  Total iterations: {len(all_full_results)}")
+    print(f"\n  Feature Importance Analysis:")
+    print(f"    • Compare 'Full' vs 'No Operational' → Operational delay contribution")
+    print(f"    • Compare 'Full' vs 'No Weather' → Weather feature contribution")
+    print(f"    • Compare 'Full' vs 'Baseline' → Total feature contribution")
+    print(f"\n  Results saved in: outputs/{ALGORITHM_NAME}_*_ablation/")
+    print("=" * 80)
+
+# =============================================================================
 # MAIN ENTRY POINT
 # =============================================================================
 
@@ -893,12 +1269,14 @@ if __name__ == '__main__':
             main_with_three_way_comparison()
         elif sys.argv[1] == '--compare':
             main_with_lstm_comparison()
+        elif sys.argv[1] == '--ablation':  # ADD THIS
+            main_with_ablation_study()
         else:
             print(f"Unknown argument: {sys.argv[1]}")
             print("\nUsage:")
             print("  python main.py                # Train MAGNN only")
             print("  python main.py --compare      # Compare MAGNN vs MAGNN-LSTM")
             print("  python main.py --compare-all  # Compare all three models")
-            print("  python main.py --mtl          # Same as --compare-all")
+            print("  python main.py --ablation     # Feature ablation study")  # ADD THIS
     else:
         main()

@@ -1,6 +1,6 @@
 """
-model.py - COMPLETE VERSION WITH MTL
-All neural network components including Multi-Task Learning
+model.py - COMPLETE VERSION WITH MULTI-SEGMENT PATH MTL
+All neural network components including Multi-Task Learning for paths
 """
 
 import numpy as np
@@ -19,7 +19,7 @@ from torch.utils.data import Dataset, DataLoader
 import torch.optim as optim
 
 from config import Config, DEVICE, print_section, haversine_meters
-from mtl import MTLHead, MTLLoss, extract_segment_features
+from mtl import MTLHead, MTLLoss
 
 warnings.filterwarnings('ignore')
 
@@ -123,18 +123,7 @@ class EnhancedSegmentDataset(SegmentDataset):
 
         for col in operational_cols:
             if col not in self.segments_df.columns:
-                if col == 'congestion':
-                    if 'distance_m' in self.segments_df.columns:
-                        avg_speed_mps = 8.33
-                        expected_duration = self.segments_df['distance_m'] / avg_speed_mps
-                        expected_duration = expected_duration.replace(0, np.nan)
-                        self.segments_df['congestion'] = (
-                                self.segments_df['duration_sec'] / expected_duration
-                        ).fillna(1.0).clip(0.1, 5.0)
-                    else:
-                        self.segments_df['congestion'] = 1.0
-                else:
-                    self.segments_df[col] = 0.0
+                self.segments_df[col] = 0.0
 
         if fit_scalers:
             print(f"\n🔍 DEBUG: Operational features BEFORE RobustScaler:")
@@ -172,14 +161,7 @@ class EnhancedSegmentDataset(SegmentDataset):
 
         for col in weather_cols:
             if col not in self.segments_df.columns:
-                defaults = {
-                    'temperature_2m': 0.0,
-                    'apparent_temperature': 0.0,
-                    'windspeed_10m': 0.0,
-                    'windgusts_10m': 0.0,
-                    'winddirection_10m': 0.0
-                }
-                self.segments_df[col] = defaults.get(col, 0.0)
+                self.segments_df[col] = 0.0
 
         if fit_scalers:
             print(f"\n🔍 DEBUG: Weather features (using RAW - already scaled in CSV):")
@@ -228,6 +210,153 @@ class EnhancedSegmentDataset(SegmentDataset):
 
         return seg_type_idx, temporal, operational, weather, target, seq_len
 
+
+# =============================================================================
+# PATH DATASET (for multi-segment MTL)
+# =============================================================================
+
+class PathDataset(Dataset):
+    """Dataset for multi-segment paths (seq_len > 1)."""
+
+    def __init__(self, paths_df, segment_types, max_path_length=10,
+                 fit_scalers: bool = True,
+                 target_scaler: RobustScaler = None,
+                 speed_scaler: RobustScaler = None,
+                 operational_scaler: RobustScaler = None,
+                 weather_scaler: RobustScaler = None,
+                 use_operational: bool = True,  # ✅ ADDED
+                 use_weather: bool = True):  # ✅ ADDED
+
+        self.paths_df = paths_df.copy()
+        self.segment_types = list(segment_types)
+        self.seg_to_idx = {seg: i for i, seg in enumerate(self.segment_types)}
+        self.max_path_length = max_path_length
+
+        # ✅ ADDED: Feature flags for ablation studies
+        self.use_operational = use_operational
+        self.use_weather = use_weather
+
+        if fit_scalers:
+            self.target_scaler = RobustScaler()
+            self.speed_scaler = RobustScaler()
+            self.operational_scaler = RobustScaler()
+            self.weather_scaler = RobustScaler()
+
+            self.target_scaler.fit(self.paths_df[['total_duration']])
+
+            all_speeds = []
+            all_operational = []
+            all_weather = []
+
+            for idx, row in self.paths_df.iterrows():
+                all_speeds.extend(row['speeds'])
+                for i in range(row['seq_len']):
+                    all_operational.append([
+                        row['arrival_delays'][i],
+                        row['departure_delays'][i]
+                    ])
+                    all_weather.append([
+                        row['temperatures'][i],
+                        row['apparent_temps'][i],
+                        row['windspeeds'][i],
+                        row['windgusts'][i],
+                        row['wind_directions'][i]
+                    ])
+
+            if all_speeds:
+                self.speed_scaler.fit(np.array(all_speeds).reshape(-1, 1))
+            if all_operational:
+                self.operational_scaler.fit(np.array(all_operational))
+            if all_weather:
+                self.weather_scaler.fit(np.array(all_weather))
+        else:
+            self.target_scaler = target_scaler
+            self.speed_scaler = speed_scaler
+            self.operational_scaler = operational_scaler
+            self.weather_scaler = weather_scaler
+
+    def __len__(self):
+        return len(self.paths_df)
+
+    def __getitem__(self, idx):
+        row = self.paths_df.iloc[idx]
+        seq_len = int(row['seq_len'])
+
+        seg_indices = []
+        for seg_id in row['segment_ids']:
+            seg_idx = self.seg_to_idx.get(seg_id, 0)
+            seg_indices.append(seg_idx)
+
+        temporal_features = []
+        for i in range(seq_len):
+            hour = row['hours'][i]
+            dow = row['days_of_week'][i]
+            speed = row['speeds'][i]
+
+            hour_sin = np.sin(2 * np.pi * hour / 24)
+            hour_cos = np.cos(2 * np.pi * hour / 24)
+            dow_sin = np.sin(2 * np.pi * dow / 7)
+            dow_cos = np.cos(2 * np.pi * dow / 7)
+
+            speed_scaled = self.speed_scaler.transform([[speed]])[0, 0]
+
+            temporal_features.append([
+                hour_sin, hour_cos, dow_sin, dow_cos, speed_scaled
+            ])
+
+        # ✅ FIXED: Conditionally process operational features
+        operational_features = []
+        for i in range(seq_len):
+            if self.use_operational:
+                operational_features.append([
+                    row['arrival_delays'][i],
+                    row['departure_delays'][i]
+                ])
+            else:
+                # Ablation: zero out operational features
+                operational_features.append([0.0, 0.0])
+
+        if self.use_operational:
+            operational_scaled = self.operational_scaler.transform(operational_features)
+        else:
+            operational_scaled = np.array(operational_features)  # Already zeros
+
+        # ✅ FIXED: Conditionally process weather features
+        weather_features = []
+        for i in range(seq_len):
+            if self.use_weather:
+                weather_features.append([
+                    row['temperatures'][i],
+                    row['apparent_temps'][i],
+                    row['windspeeds'][i],
+                    row['windgusts'][i],
+                    row['wind_directions'][i]
+                ])
+            else:
+                # Ablation: zero out weather features
+                weather_features.append([0.0, 0.0, 0.0, 0.0, 0.0])
+
+        if self.use_weather:
+            weather_scaled = self.weather_scaler.transform(weather_features)
+        else:
+            weather_scaled = np.array(weather_features)  # Already zeros
+
+        target_scaled = self.target_scaler.transform([[row['total_duration']]])[0, 0]
+
+        # Padding
+        while len(seg_indices) < self.max_path_length:
+            seg_indices.append(0)
+            temporal_features.append([0, 0, 0, 0, 0])
+            operational_scaled = np.vstack([operational_scaled, [0, 0]])
+            weather_scaled = np.vstack([weather_scaled, [0, 0, 0, 0, 0]])
+
+        seg_indices = torch.LongTensor(seg_indices[:self.max_path_length])
+        temporal = torch.FloatTensor(temporal_features[:self.max_path_length])
+        operational = torch.FloatTensor(operational_scaled[:self.max_path_length])
+        weather = torch.FloatTensor(weather_scaled[:self.max_path_length])
+        target = torch.FloatTensor([target_scaled])
+
+        return seg_indices, temporal, operational, weather, target, seq_len
 
 # =============================================================================
 # MODELS
@@ -449,50 +578,40 @@ class MAGNN_LSTM(nn.Module):
         final_prediction = magnn_baseline + 0.5 * lstm_correction
         return final_prediction
 
-
-# =============================================================================
-# NEW: MAGNN-LSTM-MTL MODEL
-# =============================================================================
+# Find the MAGNN_LSTM_MTL class (around line 555) and replace the __init__ and forward methods:
 
 class MAGNN_LSTM_MTL(nn.Module):
-    """
-    MAGNN-LSTM with Multi-Task Learning head.
-
-    Architecture:
-    1. MAGNN provides baseline prediction + spatial embeddings
-    2. LSTM processes spatial + operational + weather + temporal features
-    3. MTL head performs dual prediction:
-       - Task 1: Individual segment predictions
-       - Task 2: Collective path prediction (with L2-norm attention)
-    4. Final output: Residual learning (MAGNN baseline + MTL correction)
-    """
+    """MAGNN-LSTM with Multi-Task Learning for multi-segment paths."""
 
     def __init__(self, magnn_model, spatial_dim, operational_dim, weather_dim,
-                 temporal_dim=5, lstm_hidden=32, lstm_layers=1, dropout=0.4,
-                 mtl_segment_hidden=64, mtl_path_hidden=128,
+                 temporal_dim=5, lstm_hidden=64, lstm_layers=1, dropout=0.2,
+                 mtl_segment_hidden=64, mtl_path_hidden=128,  # ✅ FIXED parameter names
                  freeze_magnn=True):
         super().__init__()
 
         self.magnn = magnn_model
         self.freeze_magnn = freeze_magnn
+        self.lstm_input_dim = spatial_dim + operational_dim + weather_dim + temporal_dim
 
         if freeze_magnn:
             for param in self.magnn.parameters():
                 param.requires_grad = False
 
-        # LSTM for feature processing
-        self.lstm_model = LSTMWithGlobalTemporalAttention(
-            spatial_dim=spatial_dim,
-            operational_dim=operational_dim,
-            weather_dim=weather_dim,
-            temporal_dim=temporal_dim,
-            hidden_dim=lstm_hidden,
-            n_layers=lstm_layers,
-            dropout=dropout,
-            out_dim=lstm_hidden  # Output features, not final prediction
+        # ✅ FIXED: LSTM that processes FULL sequences
+        self.lstm = nn.LSTM(
+            input_size=self.lstm_input_dim,
+            hidden_size=lstm_hidden,
+            num_layers=lstm_layers,
+            batch_first=True,
+            dropout=0.0
         )
 
-        # MTL head for dual-task prediction
+        self.global_attention = GlobalTemporalAttention(
+            feature_dim=lstm_hidden,
+            dropout=dropout
+        )
+
+        # ✅ FIXED: Correct parameter names
         self.mtl_head = MTLHead(
             feature_dim=lstm_hidden,
             segment_hidden=mtl_segment_hidden,
@@ -511,64 +630,44 @@ class MAGNN_LSTM_MTL(nn.Module):
         return spatial_embeddings
 
     def forward(self, seg_indices, temporal_features, operational_features, weather_features,
-                return_mtl_components=False):
-        """
-        Args:
-            seg_indices: [batch] - segment indices
-            temporal_features: [batch, 5]
-            operational_features: [batch, operational_dim]
-            weather_features: [batch, weather_dim]
-            return_mtl_components: if True, return MTL individual predictions and attention
+                mask=None, return_components=False):
+        batch_size, seq_len, _ = temporal_features.size()
 
-        Returns:
-            If return_mtl_components=False:
-                final_prediction: [batch, 1]
-            If return_mtl_components=True:
-                (final_prediction, individual_preds, path_pred, attention_weights)
-        """
-        # Get MAGNN baseline
-        with torch.no_grad():
-            magnn_baseline = self.magnn(seg_indices, temporal_features)
-
-        # Get spatial embeddings from MAGNN
         if self.freeze_magnn:
             with torch.no_grad():
                 spatial_embeddings = self.get_magnn_embeddings(seg_indices)
         else:
             spatial_embeddings = self.get_magnn_embeddings(seg_indices)
 
-        # Concatenate all features
-        combined_features = torch.cat([
-            spatial_embeddings,
-            operational_features,
-            weather_features,
-            temporal_features
-        ], dim=1)
+        # ✅ FIXED: Build FULL sequence BEFORE LSTM (not segment-by-segment)
+        combined_sequence = []
+        for t in range(seq_len):
+            combined = torch.cat([
+                spatial_embeddings[:, t, :],
+                operational_features[:, t, :],
+                weather_features[:, t, :],
+                temporal_features[:, t, :]
+            ], dim=1)
+            combined_sequence.append(combined)
 
-        # Process through LSTM to get rich features
-        seq_features = combined_features.unsqueeze(1)
-        lstm_features = self.lstm_model(seq_features)  # [batch, lstm_hidden]
+        # Stack into [batch, seq_len, features]
+        combined_sequence = torch.stack(combined_sequence, dim=1)
 
-        # Convert to sequence format for MTL
-        segment_features = extract_segment_features(lstm_features, seq_len=1)  # [batch, 1, lstm_hidden]
+        # ✅ FIXED: Process ENTIRE path as one sequence
+        lstm_out, _ = self.lstm(combined_sequence)  # [batch, seq_len, lstm_hidden]
 
-        # MTL prediction
-        if return_mtl_components:
-            individual_preds, path_pred, attention_weights = self.mtl_head(
-                segment_features, return_components=True
+        # Apply global attention
+        attn_out, attn_weights = self.global_attention(lstm_out)  # [batch, seq_len, lstm_hidden]
+
+        # ✅ FIXED: Pass mask to MTL head
+        if return_components:
+            individual_preds, collective_pred, attention = self.mtl_head(
+                attn_out, mask=mask, return_components=True
             )
-
-            # Final prediction: MAGNN baseline + MTL correction
-            final_prediction = magnn_baseline + 0.5 * path_pred
-
-            return final_prediction, individual_preds, path_pred, attention_weights
+            return individual_preds, collective_pred, attention
         else:
-            path_pred = self.mtl_head(segment_features, return_components=False)
-
-            # Final prediction: MAGNN baseline + MTL correction
-            final_prediction = magnn_baseline + 0.5 * path_pred
-
-            return final_prediction
+            collective_pred = self.mtl_head(attn_out, mask=mask, return_components=False)
+            return collective_pred
 
 
 class SimpleMLP(nn.Module):
@@ -643,6 +742,20 @@ def enhanced_collate_fn(batch):
 
     mask = torch.arange(max_len).unsqueeze(0) < lengths.unsqueeze(1)
     return seg_indices, temporal_pad, operational_pad, weather_pad, targets, lengths, mask
+
+
+def path_collate_fn(batch):
+    seg_indices = torch.stack([item[0] for item in batch])
+    temporal = torch.stack([item[1] for item in batch])
+    operational = torch.stack([item[2] for item in batch])
+    weather = torch.stack([item[3] for item in batch])
+    targets = torch.stack([item[4] for item in batch])
+    lengths = torch.LongTensor([item[5] for item in batch])
+
+    max_len = seg_indices.size(1)
+    mask = torch.arange(max_len).unsqueeze(0) < lengths.unsqueeze(1)
+
+    return seg_indices, temporal, operational, weather, targets, lengths, mask
 
 
 # =============================================================================
@@ -949,21 +1062,16 @@ def train_magnn_lstm(train_loader, val_loader, test_loader,
     return results, model
 
 
-# =============================================================================
-# NEW: MAGNN-LSTM-MTL TRAINING FUNCTION
-# =============================================================================
-
 def train_magnn_lstm_mtl(train_loader, val_loader, test_loader,
                          adj_geo, adj_dist, adj_soc,
                          segment_types, scaler,
                          output_folder, device, cfg,
                          pretrained_magnn_path=None,
                          freeze_magnn=True):
-    """Train MAGNN-LSTM-MTL model with multi-task learning."""
-    print_section("MAGNN-LSTM-MTL TRAINING (Multi-Task Learning)")
+    """Train MAGNN-LSTM-MTL with REAL multi-segment paths."""
+    print_section("MAGNN-LSTM-MTL TRAINING (Multi-Segment Paths)")
     num_segments = len(segment_types)
 
-    # Load pre-trained MAGNN
     magnn_base = MAGTTE(num_segments, cfg.n_heads, cfg.node_embed_dim, cfg.gat_hidden,
                         cfg.lstm_hidden, cfg.historical_dim, cfg.dropout).to(device)
     magnn_base.set_adjacency_matrices(adj_geo, adj_dist, adj_soc)
@@ -972,26 +1080,26 @@ def train_magnn_lstm_mtl(train_loader, val_loader, test_loader,
         magnn_base.load_state_dict(torch.load(pretrained_magnn_path, map_location=device))
         print(f"   ✓ Loaded pre-trained MAGNN from {pretrained_magnn_path}")
 
-    # Create MTL model
+    # In train_magnn_lstm_mtl function, update the model initialization:
+
     model = MAGNN_LSTM_MTL(
         magnn_base,
         cfg.gat_hidden,
         2,  # operational_dim
         5,  # weather_dim
         5,  # temporal_dim
-        32,  # lstm_hidden
+        64,  # lstm_hidden
         1,  # lstm_layers
-        0.1,  # dropout
-        cfg.mtl_segment_hidden,
-        cfg.mtl_path_hidden,
+        0.2,  # dropout
+        64,  # mtl_segment_hidden (was mtl_individual_hidden)
+        128,  # mtl_path_hidden (was mtl_collective_hidden)
         freeze_magnn
     ).to(device)
 
     n_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
     print(f"   Trainable params: {n_params:,}")
-    print(f"   MTL lambda: {cfg.mtl_lambda} (individual vs collective task balance)")
+    print(f"   MTL lambda: {cfg.mtl_lambda} (individual vs collective balance)")
 
-    # Optimizer and scheduler
     optimizer = optim.Adam(
         filter(lambda p: p.requires_grad, model.parameters()),
         lr=cfg.learning_rate * 0.1,
@@ -999,7 +1107,6 @@ def train_magnn_lstm_mtl(train_loader, val_loader, test_loader,
     )
     scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='min', factor=0.5, patience=5)
 
-    # MTL loss with lambda weighting
     mtl_criterion = MTLLoss(lambda_weight=cfg.mtl_lambda, criterion=nn.SmoothL1Loss())
 
     best_val_loss = float('inf')
@@ -1010,25 +1117,24 @@ def train_magnn_lstm_mtl(train_loader, val_loader, test_loader,
     for epoch in range(1, cfg.n_epochs + 1):
         model.train()
         train_loss = 0.0
-        train_individual_loss = 0.0
-        train_collective_loss = 0.0
+        train_ind_loss = 0.0
+        train_col_loss = 0.0
         n_batches = 0
 
         for batch in train_loader:
             seg_idx, temporal, operational, weather, target, lengths, mask = batch
             seg_idx = seg_idx.to(device)
-            temporal = temporal.squeeze(1).to(device)
-            operational = operational.squeeze(1).to(device)
-            weather = weather.squeeze(1).to(device)
+            temporal = temporal.to(device)
+            operational = operational.to(device)
+            weather = weather.to(device)
             target = target.to(device)
+            mask = mask.to(device)
 
-            # Forward pass with MTL components
-            final_pred, individual_preds, path_pred, attention_weights = model(
-                seg_idx, temporal, operational, weather, return_mtl_components=True
+            individual_preds, collective_pred, attention = model(
+                seg_idx, temporal, operational, weather, mask, return_components=True
             )
 
-            # Calculate MTL loss
-            loss, loss_dict = mtl_criterion(individual_preds, path_pred, target)
+            loss, loss_dict = mtl_criterion(individual_preds, collective_pred, target, mask)
 
             if torch.isnan(loss) or torch.isinf(loss):
                 continue
@@ -1039,19 +1145,16 @@ def train_magnn_lstm_mtl(train_loader, val_loader, test_loader,
             optimizer.step()
 
             train_loss += loss_dict['total']
-            train_individual_loss += loss_dict['individual']
-            train_collective_loss += loss_dict['collective']
+            train_ind_loss += loss_dict['individual']
+            train_col_loss += loss_dict['collective']
             n_batches += 1
 
         train_loss /= max(n_batches, 1)
-        train_individual_loss /= max(n_batches, 1)
-        train_collective_loss /= max(n_batches, 1)
+        train_ind_loss /= max(n_batches, 1)
+        train_col_loss /= max(n_batches, 1)
 
-        # Validation
         model.eval()
         val_loss = 0.0
-        val_individual_loss = 0.0
-        val_collective_loss = 0.0
         val_preds, val_targets = [], []
         n_val = 0
 
@@ -1059,28 +1162,25 @@ def train_magnn_lstm_mtl(train_loader, val_loader, test_loader,
             for batch in val_loader:
                 seg_idx, temporal, operational, weather, target, lengths, mask = batch
                 seg_idx = seg_idx.to(device)
-                temporal = temporal.squeeze(1).to(device)
-                operational = operational.squeeze(1).to(device)
-                weather = weather.squeeze(1).to(device)
+                temporal = temporal.to(device)
+                operational = operational.to(device)
+                weather = weather.to(device)
                 target = target.to(device)
+                mask = mask.to(device)
 
-                final_pred, individual_preds, path_pred, attention_weights = model(
-                    seg_idx, temporal, operational, weather, return_mtl_components=True
+                individual_preds, collective_pred, attention = model(
+                    seg_idx, temporal, operational, weather, mask, return_components=True
                 )
 
-                loss, loss_dict = mtl_criterion(individual_preds, path_pred, target)
+                loss, loss_dict = mtl_criterion(individual_preds, collective_pred, target, mask)
 
                 if not torch.isnan(loss) and not torch.isinf(loss):
                     val_loss += loss_dict['total']
-                    val_individual_loss += loss_dict['individual']
-                    val_collective_loss += loss_dict['collective']
                     n_val += 1
-                    val_preds.append(final_pred.cpu().numpy())
+                    val_preds.append(collective_pred.cpu().numpy())
                     val_targets.append(target.cpu().numpy())
 
         val_loss /= max(n_val, 1)
-        val_individual_loss /= max(n_val, 1)
-        val_collective_loss /= max(n_val, 1)
         scheduler.step(val_loss)
 
         if val_preds:
@@ -1092,7 +1192,7 @@ def train_magnn_lstm_mtl(train_loader, val_loader, test_loader,
 
         if epoch % max(1, cfg.n_epochs // 5) == 0 or epoch == 1:
             print(f"  Epoch {epoch:>3}/{cfg.n_epochs}  "
-                  f"train_loss={train_loss:.4f} (ind:{train_individual_loss:.4f} col:{train_collective_loss:.4f})  "
+                  f"train_loss={train_loss:.4f} (ind:{train_ind_loss:.4f} col:{train_col_loss:.4f})  "
                   f"val_loss={val_loss:.4f}  val_R²={val_r2:.4f}")
 
         if not np.isnan(val_loss) and val_loss < best_val_loss:
@@ -1117,22 +1217,27 @@ def train_magnn_lstm_mtl(train_loader, val_loader, test_loader,
             for batch in loader:
                 seg_idx, temporal, operational, weather, target, lengths, mask = batch
                 seg_idx = seg_idx.to(device)
-                temporal = temporal.squeeze(1).to(device)
-                operational = operational.squeeze(1).to(device)
-                weather = weather.squeeze(1).to(device)
-                pred = model(seg_idx, temporal, operational, weather, return_mtl_components=False)
+                temporal = temporal.to(device)
+                operational = operational.to(device)
+                weather = weather.to(device)
+                mask = mask.to(device)
+
+                pred = model(seg_idx, temporal, operational, weather, mask, return_components=False)
                 preds.append(pred.cpu().numpy())
                 targets.append(target.cpu().numpy())
+
         if not preds:
             return {}
+
         p = scaler.inverse_transform(np.concatenate(preds))
         t = scaler.inverse_transform(np.concatenate(targets))
         r2 = r2_score(t, p)
         rmse = np.sqrt(mean_squared_error(t, p))
         mae = mean_absolute_error(t, p)
-        mask = t.flatten() > 0
-        mape = np.mean(np.abs((t.flatten()[mask] - p.flatten()[mask]) /
-                              t.flatten()[mask])) * 100 if mask.any() else float('nan')
+        mask_valid = t.flatten() > 0
+        mape = np.mean(np.abs((t.flatten()[mask_valid] - p.flatten()[mask_valid]) /
+                              t.flatten()[mask_valid])) * 100 if mask_valid.any() else float('nan')
+
         print(f"   {name:<6}  R²={r2:.4f}  RMSE={rmse:.2f}s  MAE={mae:.2f}s  MAPE={mape:.2f}%")
         return {'r2': r2, 'rmse': rmse, 'mae': mae, 'mape': mape,
                 'preds': p.flatten().tolist(), 'actual': t.flatten().tolist()}

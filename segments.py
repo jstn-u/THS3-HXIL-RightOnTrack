@@ -4,11 +4,15 @@ segments.py
 Segment building and adjacency matrix construction — shared across all
 clustering methods.
 
-NOW WITH DEBUG OUTPUT to diagnose missing variance in features.
+NOW WITH:
+- Operational delay + weather feature preservation
+- Debug output to diagnose feature variance
+- Multi-segment path aggregation for MTL
 
 Public API:
     build_segments_fixed(df, clusters)
-    build_adjacency_matrices_fixed(segments_df, clusters, social_data_path, config)
+    build_adjacency_matrices_fixed(segments_df, clusters, known_stops, social_data_path)
+    aggregate_segments_into_paths(segments_df, max_path_length)
 """
 
 import numpy as np
@@ -37,6 +41,12 @@ def build_segments_fixed(df, clusters):
 
     NOW PRESERVES: Operational delay + weather features from raw data!
     WITH DEBUG: Shows feature values before scaling
+
+    Key Fix:
+    - Track LAST timestamp in origin cluster (departure time)
+    - Track FIRST timestamp in destination cluster (arrival time)
+    - Duration = Arrival - Departure
+    - This excludes dwelling time at the origin station
     """
     print_section("BUILDING SEGMENTS (CORRECTED)")
 
@@ -46,6 +56,9 @@ def build_segments_fixed(df, clusters):
 
     cluster_tree = BallTree(np.radians(clusters), metric='haversine')
 
+    # Maximum radius to assign a GPS point to a cluster.
+    # Points farther than this are treated as between-station noise (-1).
+    # 300m covers a typical train station zone (platform + approach area).
     CLUSTER_ASSIGN_RADIUS_M = 300
     CLUSTER_ASSIGN_RADIUS_RAD = CLUSTER_ASSIGN_RADIUS_M / 6371000
 
@@ -287,11 +300,87 @@ def build_segments_fixed(df, clusters):
 
 
 # =============================================================================
+# PATH AGGREGATION FOR MTL
+# =============================================================================
+
+def aggregate_segments_into_paths(segments_df, max_path_length=10):
+    """
+    Aggregate individual segments into multi-segment paths based on trip_id.
+
+    Args:
+        segments_df: DataFrame with columns [trip_id, segment_id, duration_sec, ...]
+        max_path_length: Maximum number of segments per path
+
+    Returns:
+        paths_df: DataFrame where each row is a path containing multiple segments
+    """
+    print_section("AGGREGATING SEGMENTS INTO PATHS")
+
+    if 'trip_id' not in segments_df.columns:
+        print("   ❌ No 'trip_id' column found - cannot aggregate into paths")
+        print("   Returning original segments (seq_len=1)")
+        return segments_df
+
+    paths = []
+
+    for trip_id, trip_group in segments_df.groupby('trip_id'):
+        # Sort segments chronologically (segments are already built in order)
+        trip_group = trip_group.head(max_path_length)
+        seq_len = len(trip_group)
+
+        if seq_len == 0:
+            continue
+
+        # Aggregate path-level features
+        path = {
+            'trip_id': trip_id,
+            'seq_len': seq_len,
+            'total_duration': trip_group['duration_sec'].sum(),
+
+            # Store segment-level data as lists
+            'segment_ids': trip_group['segment_id'].tolist(),
+            'segment_durations': trip_group['duration_sec'].tolist(),
+
+            # Temporal features (per segment)
+            'hours': trip_group['hour'].tolist() if 'hour' in trip_group.columns else [0] * seq_len,
+            'days_of_week': trip_group['day_of_week'].tolist() if 'day_of_week' in trip_group.columns else [0] * seq_len,
+
+            # Operational features (per segment)
+            'arrival_delays': trip_group['arrivalDelay'].tolist() if 'arrivalDelay' in trip_group.columns else [0] * seq_len,
+            'departure_delays': trip_group['departureDelay'].tolist() if 'departureDelay' in trip_group.columns else [0] * seq_len,
+
+            # Weather features (per segment)
+            'temperatures': trip_group['temperature_2m'].tolist() if 'temperature_2m' in trip_group.columns else [0] * seq_len,
+            'apparent_temps': trip_group['apparent_temperature'].tolist() if 'apparent_temperature' in trip_group.columns else [0] * seq_len,
+            'windspeeds': trip_group['windspeed_10m'].tolist() if 'windspeed_10m' in trip_group.columns else [0] * seq_len,
+            'windgusts': trip_group['windgusts_10m'].tolist() if 'windgusts_10m' in trip_group.columns else [0] * seq_len,
+            'wind_directions': trip_group['winddirection_10m'].tolist() if 'winddirection_10m' in trip_group.columns else [0] * seq_len,
+
+            # Spatial features
+            'speeds': trip_group['speed_mps'].tolist() if 'speed_mps' in trip_group.columns else [0] * seq_len,
+        }
+
+        paths.append(path)
+
+    paths_df = pd.DataFrame(paths)
+
+    print(f"   ✓ Aggregated {len(segments_df)} segments into {len(paths_df)} paths")
+    print(f"   ✓ Path lengths: min={paths_df['seq_len'].min()}, "
+          f"max={paths_df['seq_len'].max()}, "
+          f"mean={paths_df['seq_len'].mean():.1f}")
+
+    return paths_df
+
+
+# =============================================================================
 # ADJACENCY MATRICES
 # =============================================================================
 
 def _fuzzy_match_station(name, candidates):
-    """Return the best-matching candidate for `name` using token overlap."""
+    """
+    Return the best-matching candidate for `name` using token overlap.
+    Returns None if no candidate shares enough meaningful tokens.
+    """
     stop_words = {'street', 'avenue', 'place', 'drive', 'road', 'st', 'ave',
                   'platform', '1', '2', 'interchange', 'north', 'crescent'}
     name_core = set(name.lower().replace('&', 'and').split()) - stop_words
@@ -307,7 +396,28 @@ def _fuzzy_match_station(name, candidates):
 
 
 def _assign_social_vectors_to_clusters(clusters, soc_df_with_coords):
-    """Assign a social-function vector to every cluster."""
+    """
+    Assign a social-function vector to every cluster.
+
+    Algorithm
+    ─────────
+    Each cluster centre (lat, lon) is compared against every station that
+    has BOTH a GPS coordinate (from known_stops) AND a social-function
+    row (from social_function.csv). The cluster inherits the [Level 1,
+    Level 2, Level 3] vector of the station whose GPS coordinate is closest,
+    with no distance cap — every cluster gets a vector, even remote delay
+    clusters, because the nearest station is always the best available proxy.
+
+    Parameters
+    ──────────
+    clusters           : np.ndarray (N, 2) — [lat, lon] per cluster
+    soc_df_with_coords : list of (station_name, lat, lon, np.array([L1, L2, L3]))
+                         — stations that have both GPS and social data
+
+    Returns
+    ───────
+    dict { cluster_idx (int) -> np.array([L1, L2, L3]) }
+    """
     cluster_social = {}
 
     if not soc_df_with_coords:
@@ -338,8 +448,38 @@ def _assign_social_vectors_to_clusters(clusters, soc_df_with_coords):
 
 
 def build_adjacency_matrices_fixed(segments_df, clusters,
+                                   known_stops=None,
                                    social_path='./data/social_function.csv'):
-    """Build three N×N adjacency matrices."""
+    """
+    Build three N×N adjacency matrices (N = number of unique segment types).
+
+    adj_geo  — Gaussian similarity on segment length.
+               Segments of equal length → score ≈ 1.
+
+    adj_dist — Sequential topology: entry [i,j] = 1 if segment j starts
+               where segment i ends, then row-normalised.
+
+    adj_soc  — Cosine similarity between per-segment social-function vectors.
+
+               How social vectors are derived
+               ─────────────────────────────
+               1. Load social_function.csv (13 stations × [L1, L2, L3]).
+               2. For each station in the CSV, find its GPS coordinate from
+                  known_stops using token-based name matching.
+               3. Every cluster centre (including injected station clusters
+                  AND delay clusters) picks up the [L1, L2, L3] vector of
+                  the social-function station whose GPS is nearest to it.
+                  No distance cap: every cluster always gets a vector.
+               4. Each segment's vector = mean of its origin + dest cluster
+                  vectors. Cosine similarity → clipped to [0, 1].
+
+    Parameters
+    ──────────
+    segments_df : DataFrame with 'segment_id', 'distance_m', etc.
+    clusters    : np.ndarray (N, 2) — [lat, lon] per cluster
+    known_stops : dict {stop_name: (lat, lon)} — from data loader
+    social_path : str — path to social_function.csv
+    """
     print_section("BUILDING ADJACENCY MATRICES")
 
     if len(segments_df) == 0:
@@ -355,7 +495,9 @@ def build_adjacency_matrices_fixed(segments_df, clusters,
     adj_dist = np.zeros((n_segments, n_segments))
     adj_soc = np.zeros((n_segments, n_segments))
 
-    # Geographic — Gaussian similarity on segment length
+    # ------------------------------------------------------------------
+    # 1. Geographic — Gaussian similarity on segment length
+    # ------------------------------------------------------------------
     SIGMA_M = 500.0
     seg_lengths = {
         sid: segments_df.loc[segments_df['segment_id'] == sid, 'distance_m'].mean()
@@ -371,7 +513,9 @@ def build_adjacency_matrices_fixed(segments_df, clusters,
 
     print(f"   ✓ adj_geo  built  (Gaussian length similarity, σ={SIGMA_M} m)")
 
-    # Distance — sequential topology
+    # ------------------------------------------------------------------
+    # 2. Distance — sequential topology
+    # ------------------------------------------------------------------
     for sid in segment_types:
         o, d = map(int, sid.split('_'))
         idx_i = seg_to_idx[sid]
@@ -386,8 +530,10 @@ def build_adjacency_matrices_fixed(segments_df, clusters,
 
     print(f"   ✓ adj_dist built  (sequential topology, row-normalised)")
 
-    # Social — cosine similarity
-    global _known_stops_cache
+    # ------------------------------------------------------------------
+    # 3. Social — cosine similarity on [Level 1, Level 2, Level 3]
+    # ------------------------------------------------------------------
+    _cache = known_stops or {}
 
     if os.path.exists(social_path):
         soc_df = pd.read_csv(social_path).dropna(subset=['station'])
@@ -395,9 +541,9 @@ def build_adjacency_matrices_fixed(segments_df, clusters,
 
         soc_df_with_coords = []
 
-        if _known_stops_cache:
-            known_names = list(_known_stops_cache.keys())
-            known_coords = np.array([_known_stops_cache[n] for n in known_names])
+        if _cache:
+            known_names = list(_cache.keys())
+            known_coords = np.array([_cache[n] for n in known_names])
 
             for _, srow in soc_df.iterrows():
                 soc_name = str(srow['station']).strip()
@@ -407,6 +553,7 @@ def build_adjacency_matrices_fixed(segments_df, clusters,
                                     float(srow['Level 2']),
                                     float(srow['Level 3'])], dtype=float)
 
+                # Token overlap candidates
                 soc_tokens = set(soc_name.lower().replace('&', 'and').split())
                 stop_words = {'street', 'avenue', 'place', 'drive', 'road',
                               'st', 'ave', 'platform', '1', '2',
@@ -423,12 +570,13 @@ def build_adjacency_matrices_fixed(segments_df, clusters,
                         best_score, best_name = score, kn
 
                 if best_name and best_score >= 0.25:
-                    lat, lon = _known_stops_cache[best_name]
+                    lat, lon = _cache[best_name]
                     soc_df_with_coords.append((soc_name, lat, lon, soc_vec))
                     print(f"     Social '{soc_name}' → GPS match '{best_name}' "
                           f"(score={best_score:.2f}, "
                           f"{lat:.6f}, {lon:.6f})")
                 else:
+                    # Use network centroid as fallback
                     centroid_lat = known_coords[:, 0].mean()
                     centroid_lon = known_coords[:, 1].mean()
                     soc_df_with_coords.append(
@@ -437,7 +585,7 @@ def build_adjacency_matrices_fixed(segments_df, clusters,
                     print(f"     Social '{soc_name}' → no name match, "
                           f"using network centroid as GPS proxy")
         else:
-            print("     ⚠️  _known_stops_cache is empty — "
+            print("     ⚠️  known_stops is empty — "
                   "social vectors will be assigned but GPS distances are 0")
             for _, srow in soc_df.iterrows():
                 soc_name = str(srow['station']).strip()
