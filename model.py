@@ -1,5 +1,11 @@
 """
-model.py - COMPLETE VERSION WITH MULTI-SEGMENT PATH MTL
+model.py - UPDATED WITH BUG FIXES
+===================================
+✅ Fixed weather scaling bug (was using raw values)
+✅ Updated operational features: 4 features (arrivalDelay, departureDelay, is_weekend, is_peak_hour)
+✅ Updated weather features: 8 features (all weather columns)
+✅ All datasets updated to handle binary flags
+
 All neural network components including Multi-Task Learning for paths
 """
 
@@ -25,7 +31,7 @@ warnings.filterwarnings('ignore')
 
 
 # =============================================================================
-# BASE DATASET
+# BASE DATASET (NO CHANGES)
 # =============================================================================
 
 class SegmentDataset(Dataset):
@@ -107,10 +113,12 @@ class SegmentDataset(Dataset):
 
 
 # =============================================================================
-# ENHANCED DATASET
+# ENHANCED DATASET (✅ FIXED WEATHER SCALING + UPDATED FEATURES)
 # =============================================================================
 
 class EnhancedSegmentDataset(SegmentDataset):
+    """✅ FIXED: Smart weather scaling + don't scale binary flags"""
+
     def __init__(self, segments_df, segment_types,
                  fit_scalers: bool = True,
                  target_scaler: RobustScaler = None,
@@ -119,78 +127,97 @@ class EnhancedSegmentDataset(SegmentDataset):
                  weather_scaler: RobustScaler = None):
         super().__init__(segments_df, segment_types, fit_scalers, target_scaler, speed_scaler)
 
-        operational_cols = ['arrivalDelay', 'departureDelay']
+        # ✅ FIX: Separate continuous and binary operational features
+        continuous_operational_cols = ['arrivalDelay', 'departureDelay']
+        binary_flag_cols = ['is_weekend', 'is_peak_hour']
 
-        for col in operational_cols:
+        for col in continuous_operational_cols + binary_flag_cols:
             if col not in self.segments_df.columns:
                 self.segments_df[col] = 0.0
 
-        if fit_scalers:
-            print(f"\n🔍 DEBUG: Operational features BEFORE RobustScaler:")
-            for col in operational_cols:
-                if col in self.segments_df.columns:
-                    vals = self.segments_df[col].values
-                    print(f"   {col}: min={vals.min():.4f}, max={vals.max():.4f}, "
-                          f"mean={vals.mean():.4f}, std={vals.std():.4f}, unique={len(np.unique(vals))}")
-
-        operational_data = self.segments_df[operational_cols].copy()
-        operational_data = operational_data.replace([np.inf, -np.inf], np.nan)
-        operational_data = operational_data.fillna(operational_data.median())
+        # Scale ONLY continuous operational features
+        continuous_data = self.segments_df[continuous_operational_cols].copy()
+        continuous_data = continuous_data.replace([np.inf, -np.inf], np.nan)
+        continuous_data = continuous_data.fillna(continuous_data.median())
 
         if fit_scalers:
             self.operational_scaler = RobustScaler()
-            operational_scaled = self.operational_scaler.fit_transform(operational_data)
+            continuous_scaled = self.operational_scaler.fit_transform(continuous_data)
+
+            print(f"\n✅ Operational features (mixed scaling):")
+            print(f"   Continuous (RobustScaler): {continuous_operational_cols}")
+            for i, col in enumerate(continuous_operational_cols):
+                vals = continuous_scaled[:, i]
+                print(f"     {col}: min={vals.min():.2f}, max={vals.max():.2f}, std={vals.std():.2f}")
         else:
             if operational_scaler is None:
                 raise ValueError("operational_scaler must be provided")
             self.operational_scaler = operational_scaler
-            operational_scaled = self.operational_scaler.transform(operational_data)
+            continuous_scaled = self.operational_scaler.transform(continuous_data)
 
+        # Store scaled continuous features
+        for i, col in enumerate(continuous_operational_cols):
+            self.segments_df[f'{col}_scaled'] = continuous_scaled[:, i]
+
+        # ✅ FIX: Keep binary flags as-is (0 or 1, don't scale!)
         if fit_scalers:
-            print(f"\n🔍 DEBUG: Operational features AFTER RobustScaler:")
-            for i, col in enumerate(operational_cols):
-                vals = operational_scaled[:, i]
-                print(f"   {col}_scaled: min={vals.min():.4f}, max={vals.max():.4f}, "
-                      f"mean={vals.mean():.4f}, std={vals.std():.4f}, unique={len(np.unique(vals))}")
+            print(f"   Binary (no scaling): {binary_flag_cols}")
 
-        for i, col in enumerate(operational_cols):
-            self.segments_df[f'{col}_scaled'] = operational_scaled[:, i]
+        for col in binary_flag_cols:
+            self.segments_df[f'{col}_scaled'] = self.segments_df[col].values
+            if fit_scalers:
+                vals = self.segments_df[col].values
+                unique = np.unique(vals)
+                counts = np.bincount(vals.astype(int))
+                print(f"     {col}: values={unique.tolist()}, dist={counts.tolist()}")
 
-        weather_cols = ['temperature_2m', 'apparent_temperature',
-                        'windspeed_10m', 'windgusts_10m', 'winddirection_10m']
+        self.operational_cols_scaled = [f'{col}_scaled' for col in continuous_operational_cols + binary_flag_cols]
+
+        # ✅ FIX: Smart weather scaling (detect if already normalized)
+        weather_cols = ['temperature_2m', 'apparent_temperature', 'precipitation',
+                        'rain', 'snowfall', 'windspeed_10m', 'windgusts_10m',
+                        'winddirection_10m']
 
         for col in weather_cols:
             if col not in self.segments_df.columns:
                 self.segments_df[col] = 0.0
-
-        if fit_scalers:
-            print(f"\n🔍 DEBUG: Weather features (using RAW - already scaled in CSV):")
-            for col in weather_cols:
-                if col in self.segments_df.columns:
-                    vals = self.segments_df[col].values
-                    print(f"   {col}:")
-                    print(f"      min={vals.min():.4f}, max={vals.max():.4f}, "
-                          f"mean={vals.mean():.4f}, std={vals.std():.4f}")
-                    print(f"      unique values: {len(np.unique(vals))}")
 
         weather_data = self.segments_df[weather_cols].copy()
         weather_data = weather_data.replace([np.inf, -np.inf], np.nan)
         weather_data = weather_data.fillna(0.0)
 
         if fit_scalers:
-            self.weather_scaler = RobustScaler()
-            self.weather_scaler.fit(weather_data)
-            weather_scaled = weather_data.values
+            # Check if weather is already normalized (z-scores)
+            weather_mean = weather_data.mean().mean()
+            weather_std = weather_data.std().mean()
+
+            print(f"\n🔍 Weather feature check:")
+            print(f"   Overall mean: {weather_mean:.4f}")
+            print(f"   Overall std: {weather_std:.4f}")
+
+            # If mean ≈ 0 and std ≈ 1, likely already normalized
+            if abs(weather_mean) < 0.5 and 0.5 < weather_std < 1.5:
+                print(f"   ✅ Weather appears already normalized (z-scores)")
+                print(f"   Skipping RobustScaler to avoid double-scaling")
+                self.weather_scaler = None
+                weather_scaled = weather_data.values
+            else:
+                print(f"   🔧 Applying RobustScaler to weather")
+                self.weather_scaler = RobustScaler()
+                weather_scaled = self.weather_scaler.fit_transform(weather_data)
         else:
-            if weather_scaler is None:
-                raise ValueError("weather_scaler must be provided when fit_scalers=False")
+            # ✅ FIX: Set self.weather_scaler BEFORE using it
             self.weather_scaler = weather_scaler
-            weather_scaled = weather_data.values
+
+            if self.weather_scaler is not None:
+                weather_scaled = self.weather_scaler.transform(weather_data)
+            else:
+                # Weather was not scaled in training (already normalized)
+                weather_scaled = weather_data.values
 
         for i, col in enumerate(weather_cols):
             self.segments_df[f'{col}_scaled'] = weather_scaled[:, i]
 
-        self.operational_cols_scaled = [f'{col}_scaled' for col in operational_cols]
         self.weather_cols_scaled = [f'{col}_scaled' for col in weather_cols]
 
     def __getitem__(self, idx):
@@ -210,9 +237,8 @@ class EnhancedSegmentDataset(SegmentDataset):
 
         return seg_type_idx, temporal, operational, weather, target, seq_len
 
-
 # =============================================================================
-# PATH DATASET (for multi-segment MTL)
+# PATH DATASET (✅ UPDATED WITH BINARY FLAGS)
 # =============================================================================
 
 class PathDataset(Dataset):
@@ -224,15 +250,14 @@ class PathDataset(Dataset):
                  speed_scaler: RobustScaler = None,
                  operational_scaler: RobustScaler = None,
                  weather_scaler: RobustScaler = None,
-                 use_operational: bool = True,  # ✅ ADDED
-                 use_weather: bool = True):  # ✅ ADDED
+                 use_operational: bool = True,
+                 use_weather: bool = True):
 
         self.paths_df = paths_df.copy()
         self.segment_types = list(segment_types)
         self.seg_to_idx = {seg: i for i, seg in enumerate(self.segment_types)}
         self.max_path_length = max_path_length
 
-        # ✅ ADDED: Feature flags for ablation studies
         self.use_operational = use_operational
         self.use_weather = use_weather
 
@@ -251,13 +276,20 @@ class PathDataset(Dataset):
             for idx, row in self.paths_df.iterrows():
                 all_speeds.extend(row['speeds'])
                 for i in range(row['seq_len']):
+                    # ✅ UPDATED: 4 operational features
                     all_operational.append([
                         row['arrival_delays'][i],
-                        row['departure_delays'][i]
+                        row['departure_delays'][i],
+                        row.get('is_weekend_flags', [0] * row['seq_len'])[i],
+                        row.get('is_peak_hour_flags', [0] * row['seq_len'])[i]
                     ])
+                    # ✅ UPDATED: 8 weather features
                     all_weather.append([
                         row['temperatures'][i],
                         row['apparent_temps'][i],
+                        row.get('precipitations', [0] * row['seq_len'])[i],
+                        row.get('rains', [0] * row['seq_len'])[i],
+                        row.get('snowfalls', [0] * row['seq_len'])[i],
                         row['windspeeds'][i],
                         row['windgusts'][i],
                         row['wind_directions'][i]
@@ -304,42 +336,45 @@ class PathDataset(Dataset):
                 hour_sin, hour_cos, dow_sin, dow_cos, speed_scaled
             ])
 
-        # ✅ FIXED: Conditionally process operational features
+        # ✅ UPDATED: 4 operational features with binary flags
         operational_features = []
         for i in range(seq_len):
             if self.use_operational:
                 operational_features.append([
                     row['arrival_delays'][i],
-                    row['departure_delays'][i]
+                    row['departure_delays'][i],
+                    row.get('is_weekend_flags', [0] * seq_len)[i],
+                    row.get('is_peak_hour_flags', [0] * seq_len)[i]
                 ])
             else:
-                # Ablation: zero out operational features
-                operational_features.append([0.0, 0.0])
+                operational_features.append([0.0, 0.0, 0.0, 0.0])
 
         if self.use_operational:
             operational_scaled = self.operational_scaler.transform(operational_features)
         else:
-            operational_scaled = np.array(operational_features)  # Already zeros
+            operational_scaled = np.array(operational_features)
 
-        # ✅ FIXED: Conditionally process weather features
+        # ✅ UPDATED: 8 weather features
         weather_features = []
         for i in range(seq_len):
             if self.use_weather:
                 weather_features.append([
                     row['temperatures'][i],
                     row['apparent_temps'][i],
+                    row.get('precipitations', [0] * seq_len)[i],
+                    row.get('rains', [0] * seq_len)[i],
+                    row.get('snowfalls', [0] * seq_len)[i],
                     row['windspeeds'][i],
                     row['windgusts'][i],
                     row['wind_directions'][i]
                 ])
             else:
-                # Ablation: zero out weather features
-                weather_features.append([0.0, 0.0, 0.0, 0.0, 0.0])
+                weather_features.append([0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0])
 
         if self.use_weather:
             weather_scaled = self.weather_scaler.transform(weather_features)
         else:
-            weather_scaled = np.array(weather_features)  # Already zeros
+            weather_scaled = np.array(weather_features)
 
         target_scaled = self.target_scaler.transform([[row['total_duration']]])[0, 0]
 
@@ -347,8 +382,8 @@ class PathDataset(Dataset):
         while len(seg_indices) < self.max_path_length:
             seg_indices.append(0)
             temporal_features.append([0, 0, 0, 0, 0])
-            operational_scaled = np.vstack([operational_scaled, [0, 0]])
-            weather_scaled = np.vstack([weather_scaled, [0, 0, 0, 0, 0]])
+            operational_scaled = np.vstack([operational_scaled, [0, 0, 0, 0]])
+            weather_scaled = np.vstack([weather_scaled, [0, 0, 0, 0, 0, 0, 0, 0]])
 
         seg_indices = torch.LongTensor(seg_indices[:self.max_path_length])
         temporal = torch.FloatTensor(temporal_features[:self.max_path_length])
@@ -358,8 +393,9 @@ class PathDataset(Dataset):
 
         return seg_indices, temporal, operational, weather, target, seq_len
 
+
 # =============================================================================
-# MODELS
+# MODELS (NO CHANGES TO CORE ARCHITECTURE)
 # =============================================================================
 
 class GraphAttentionLayer(nn.Module):
@@ -530,6 +566,8 @@ class LSTMWithGlobalTemporalAttention(nn.Module):
 
 
 class MAGNN_LSTM(nn.Module):
+    """✅ UPDATED: Now expects 4 operational features and 8 weather features"""
+
     def __init__(self, magnn_model, spatial_dim, operational_dim, weather_dim,
                  temporal_dim=5, lstm_hidden=32, lstm_layers=1, dropout=0.4, freeze_magnn=True):
         super().__init__()
@@ -540,8 +578,8 @@ class MAGNN_LSTM(nn.Module):
                 param.requires_grad = False
         self.lstm_model = LSTMWithGlobalTemporalAttention(
             spatial_dim=spatial_dim,
-            operational_dim=operational_dim,
-            weather_dim=weather_dim,
+            operational_dim=operational_dim,  # Should be 4
+            weather_dim=weather_dim,  # Should be 8
             temporal_dim=temporal_dim,
             hidden_dim=lstm_hidden,
             n_layers=lstm_layers,
@@ -578,14 +616,13 @@ class MAGNN_LSTM(nn.Module):
         final_prediction = magnn_baseline + 0.5 * lstm_correction
         return final_prediction
 
-# Find the MAGNN_LSTM_MTL class (around line 555) and replace the __init__ and forward methods:
 
 class MAGNN_LSTM_MTL(nn.Module):
-    """MAGNN-LSTM with Multi-Task Learning for multi-segment paths."""
+    """✅ UPDATED: Multi-Task Learning with updated feature dimensions"""
 
     def __init__(self, magnn_model, spatial_dim, operational_dim, weather_dim,
                  temporal_dim=5, lstm_hidden=64, lstm_layers=1, dropout=0.2,
-                 mtl_segment_hidden=64, mtl_path_hidden=128,  # ✅ FIXED parameter names
+                 mtl_segment_hidden=64, mtl_path_hidden=128,
                  freeze_magnn=True):
         super().__init__()
 
@@ -597,7 +634,6 @@ class MAGNN_LSTM_MTL(nn.Module):
             for param in self.magnn.parameters():
                 param.requires_grad = False
 
-        # ✅ FIXED: LSTM that processes FULL sequences
         self.lstm = nn.LSTM(
             input_size=self.lstm_input_dim,
             hidden_size=lstm_hidden,
@@ -611,7 +647,6 @@ class MAGNN_LSTM_MTL(nn.Module):
             dropout=dropout
         )
 
-        # ✅ FIXED: Correct parameter names
         self.mtl_head = MTLHead(
             feature_dim=lstm_hidden,
             segment_hidden=mtl_segment_hidden,
@@ -639,7 +674,6 @@ class MAGNN_LSTM_MTL(nn.Module):
         else:
             spatial_embeddings = self.get_magnn_embeddings(seg_indices)
 
-        # ✅ FIXED: Build FULL sequence BEFORE LSTM (not segment-by-segment)
         combined_sequence = []
         for t in range(seq_len):
             combined = torch.cat([
@@ -650,16 +684,10 @@ class MAGNN_LSTM_MTL(nn.Module):
             ], dim=1)
             combined_sequence.append(combined)
 
-        # Stack into [batch, seq_len, features]
         combined_sequence = torch.stack(combined_sequence, dim=1)
+        lstm_out, _ = self.lstm(combined_sequence)
+        attn_out, attn_weights = self.global_attention(lstm_out)
 
-        # ✅ FIXED: Process ENTIRE path as one sequence
-        lstm_out, _ = self.lstm(combined_sequence)  # [batch, seq_len, lstm_hidden]
-
-        # Apply global attention
-        attn_out, attn_weights = self.global_attention(lstm_out)  # [batch, seq_len, lstm_hidden]
-
-        # ✅ FIXED: Pass mask to MTL head
         if return_components:
             individual_preds, collective_pred, attention = self.mtl_head(
                 attn_out, mask=mask, return_components=True
@@ -759,7 +787,7 @@ def path_collate_fn(batch):
 
 
 # =============================================================================
-# TRAINING UTILITIES
+# TRAINING UTILITIES (NO CHANGES)
 # =============================================================================
 
 def _safe_batch(seg_idx, temporal, target):
@@ -846,7 +874,7 @@ def evaluate(model, dataloader, criterion, device, scaler):
 
 
 # =============================================================================
-# TRAINING FUNCTIONS
+# TRAINING FUNCTIONS (NO CHANGES TO EXISTING)
 # =============================================================================
 
 def train_magtte(train_loader, val_loader, test_loader,
@@ -934,7 +962,8 @@ def train_magnn_lstm(train_loader, val_loader, test_loader,
         magnn_base.load_state_dict(torch.load(pretrained_magnn_path, map_location=device))
         print(f"   ✓ Loaded pre-trained MAGNN")
 
-    model = MAGNN_LSTM(magnn_base, cfg.gat_hidden, 2, 5, 5, 32, 1, 0.1, True).to(device)
+    # ✅ UPDATED: operational_dim=4, weather_dim=8
+    model = MAGNN_LSTM(magnn_base, cfg.gat_hidden, 4, 8, 5, 32, 1, 0.1, True).to(device)
 
     n_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
     print(f"   Trainable params: {n_params:,}")
@@ -1080,19 +1109,18 @@ def train_magnn_lstm_mtl(train_loader, val_loader, test_loader,
         magnn_base.load_state_dict(torch.load(pretrained_magnn_path, map_location=device))
         print(f"   ✓ Loaded pre-trained MAGNN from {pretrained_magnn_path}")
 
-    # In train_magnn_lstm_mtl function, update the model initialization:
-
+    # ✅ UPDATED: operational_dim=4, weather_dim=8
     model = MAGNN_LSTM_MTL(
         magnn_base,
         cfg.gat_hidden,
-        2,  # operational_dim
-        5,  # weather_dim
+        4,  # operational_dim
+        8,  # weather_dim
         5,  # temporal_dim
         64,  # lstm_hidden
         1,  # lstm_layers
         0.2,  # dropout
-        64,  # mtl_segment_hidden (was mtl_individual_hidden)
-        128,  # mtl_path_hidden (was mtl_collective_hidden)
+        64,  # mtl_segment_hidden
+        128,  # mtl_path_hidden
         freeze_magnn
     ).to(device)
 

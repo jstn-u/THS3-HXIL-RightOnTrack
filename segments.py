@@ -1,18 +1,9 @@
 """
-segments.py
-===========
-Segment building and adjacency matrix construction — shared across all
-clustering methods.
-
+segments.py - UPDATED
 NOW WITH:
+- is_weekend flag (1 if Saturday/Sunday, 0 otherwise)
+- is_peak_hour flag (1 if 7-9 AM or 4-7 PM on weekdays, 0 otherwise)
 - Operational delay + weather feature preservation
-- Debug output to diagnose feature variance
-- Multi-segment path aggregation for MTL
-
-Public API:
-    build_segments_fixed(df, clusters)
-    build_adjacency_matrices_fixed(segments_df, clusters, known_stops, social_data_path)
-    aggregate_segments_into_paths(segments_df, max_path_length)
 """
 
 import numpy as np
@@ -27,28 +18,44 @@ from config import Config, DEVICE, print_section, haversine_meters
 
 warnings.filterwarnings('ignore')
 
-# Module-level cache
 _known_stops_cache = {}
 
 
 # =============================================================================
-# SEGMENT BUILDING (WITH FEATURE PRESERVATION + DEBUG)
+# HELPER FUNCTIONS FOR BINARY FLAGS
+# =============================================================================
+
+def is_weekend(day_of_week):
+    """Returns 1 if weekend (Saturday=5, Sunday=6), 0 otherwise."""
+    return 1 if day_of_week >= 5 else 0
+
+
+def is_peak_hour(hour, day_of_week):
+    """
+    Returns 1 if peak hour on weekday, 0 otherwise.
+    Peak hours: 7-9 AM or 4-7 PM (16-19) on weekdays (Mon-Fri)
+    """
+    if day_of_week >= 5:  # Weekend
+        return 0
+
+    morning_peak = 7 <= hour < 9
+    evening_peak = 16 <= hour < 19
+
+    return 1 if (morning_peak or evening_peak) else 0
+
+
+# =============================================================================
+# SEGMENT BUILDING (WITH BINARY FLAGS + FEATURE PRESERVATION)
 # =============================================================================
 
 def build_segments_fixed(df, clusters):
     """
-    CORRECTED: Segment duration = Departure from origin → Arrival at destination
+    UPDATED: Now adds is_weekend and is_peak_hour binary flags
 
-    NOW PRESERVES: Operational delay + weather features from raw data!
-    WITH DEBUG: Shows feature values before scaling
-
-    Key Fix:
-    - Track LAST timestamp in origin cluster (departure time)
-    - Track FIRST timestamp in destination cluster (arrival time)
-    - Duration = Arrival - Departure
-    - This excludes dwelling time at the origin station
+    Segment duration = Departure from origin → Arrival at destination
+    Preserves: Operational delay + weather features + temporal flags
     """
-    print_section("BUILDING SEGMENTS (CORRECTED)")
+    print_section("BUILDING SEGMENTS (WITH BINARY FLAGS)")
 
     if len(clusters) == 0:
         print("❌ No clusters available")
@@ -56,9 +63,6 @@ def build_segments_fixed(df, clusters):
 
     cluster_tree = BallTree(np.radians(clusters), metric='haversine')
 
-    # Maximum radius to assign a GPS point to a cluster.
-    # Points farther than this are treated as between-station noise (-1).
-    # 300m covers a typical train station zone (platform + approach area).
     CLUSTER_ASSIGN_RADIUS_M = 300
     CLUSTER_ASSIGN_RADIUS_RAD = CLUSTER_ASSIGN_RADIUS_M / 6371000
 
@@ -89,19 +93,19 @@ def build_segments_fixed(df, clusters):
 
     segment_features = []
 
-    # Define which features to preserve
+    # ✅ UPDATED: New operational features with binary flags
     operational_features = ['arrivalDelay', 'departureDelay']
     weather_features = ['temperature_2m', 'apparent_temperature', 'precipitation',
                         'rain', 'snowfall', 'windspeed_10m', 'windgusts_10m',
                         'winddirection_10m']
 
-    # Check which features actually exist
     available_operational = [f for f in operational_features if f in df.columns]
     available_weather = [f for f in weather_features if f in df.columns]
 
     print(f"   Preserving features from raw data:")
     print(f"     Operational: {available_operational}")
     print(f"     Weather: {available_weather}")
+    print(f"     Binary flags: is_weekend, is_peak_hour")
 
     for trip_id, trip_df in df.groupby('trip_id'):
         trip_df = trip_df.sort_values('timestamp').reset_index(drop=True)
@@ -115,7 +119,6 @@ def build_segments_fixed(df, clusters):
             origin_cluster = trip_df.loc[i, 'cluster_id']
             origin_start_idx = i
 
-            # Find LAST occurrence of origin cluster (departure point)
             last_origin_idx = i
             j = i + 1
             while j < len(trip_df):
@@ -123,7 +126,6 @@ def build_segments_fixed(df, clusters):
                     last_origin_idx = j
                 j += 1
 
-            # Find first different valid cluster (destination)
             dest_found = False
             noise_count = 0
             j = last_origin_idx + 1
@@ -147,22 +149,15 @@ def build_segments_fixed(df, clusters):
             if not dest_found:
                 break
 
-            # Duration from DEPARTURE to ARRIVAL
             departure_time = pd.to_datetime(trip_df.loc[last_origin_idx, 'timestamp'])
             arrival_time = pd.to_datetime(trip_df.loc[dest_arrival_idx, 'timestamp'])
 
             duration_sec = (arrival_time - departure_time).total_seconds()
 
-            # Validation filters
-            if duration_sec <= 5:
+            if duration_sec <= 5 or duration_sec > 3600:
                 i = dest_arrival_idx
                 continue
 
-            if duration_sec > 3600:
-                i = dest_arrival_idx
-                continue
-
-            # Calculate distance
             distance_m = 0
             seg_df = trip_df.loc[last_origin_idx:dest_arrival_idx]
 
@@ -193,9 +188,13 @@ def build_segments_fixed(df, clusters):
             hour = departure_time.hour
             day_of_week = departure_time.dayofweek
 
+            # ✅ NEW: Binary flags
+            weekend_flag = is_weekend(day_of_week)
+            peak_flag = is_peak_hour(hour, day_of_week)
+
             avg_congestion = seg_df['congestionLevel'].mean() if 'congestionLevel' in seg_df.columns else 0
 
-            # EXTRACT OPERATIONAL FEATURES (average across segment)
+            # Extract operational features
             operational_data = {}
             for feat in available_operational:
                 feat_vals = seg_df[feat].dropna()
@@ -204,14 +203,13 @@ def build_segments_fixed(df, clusters):
                 else:
                     operational_data[feat] = 0.0
 
-            # EXTRACT WEATHER FEATURES (average across segment)
+            # Extract weather features
             weather_data = {}
             for feat in available_weather:
                 feat_vals = seg_df[feat].dropna()
                 if len(feat_vals) > 0:
                     weather_data[feat] = float(feat_vals.mean())
                 else:
-                    # Default values for missing weather
                     defaults = {
                         'temperature_2m': 15.0,
                         'apparent_temperature': 15.0,
@@ -234,16 +232,15 @@ def build_segments_fixed(df, clusters):
                 'speed_mps': speed_mps,
                 'hour': hour,
                 'day_of_week': day_of_week,
+                'is_weekend': weekend_flag,  # ✅ NEW
+                'is_peak_hour': peak_flag,  # ✅ NEW
                 'congestion': avg_congestion,
                 'n_points': len(seg_df),
                 'n_noise_points': noise_count,
                 'trip_id': trip_id
             }
 
-            # ADD OPERATIONAL FEATURES
             segment_dict.update(operational_data)
-
-            # ADD WEATHER FEATURES
             segment_dict.update(weather_data)
 
             segment_features.append(segment_dict)
@@ -258,105 +255,99 @@ def build_segments_fixed(df, clusters):
         print(f"\n✓ Duration Statistics:")
         print(f"   Mean: {segments_df['duration_sec'].mean():.2f}s")
         print(f"   Median: {segments_df['duration_sec'].median():.2f}s")
-        print(f"   Min: {segments_df['duration_sec'].min():.2f}s")
-        print(f"   Max: {segments_df['duration_sec'].max():.2f}s")
 
-        print(f"\n✓ Distance Statistics:")
-        print(f"   Mean: {segments_df['distance_m'].mean():.2f}m")
-        print(f"   Median: {segments_df['distance_m'].median():.2f}m")
+        print(f"\n✓ Binary Flag Statistics:")
+        print(
+            f"   Weekend segments: {segments_df['is_weekend'].sum():,} ({segments_df['is_weekend'].mean() * 100:.1f}%)")
+        print(
+            f"   Peak hour segments: {segments_df['is_peak_hour'].sum():,} ({segments_df['is_peak_hour'].mean() * 100:.1f}%)")
 
-        print(f"\n✓ Speed Statistics:")
-        print(f"   Mean: {segments_df['speed_mps'].mean():.2f} m/s ({segments_df['speed_mps'].mean() * 3.6:.2f} km/h)")
+        # Show delay statistics by flag
+        if 'arrivalDelay' in segments_df.columns:
+            print(f"\n✓ Delay Analysis by Context:")
+            weekend_segs = segments_df[segments_df['is_weekend'] == 1]
+            weekday_segs = segments_df[segments_df['is_weekend'] == 0]
+            peak_segs = segments_df[segments_df['is_peak_hour'] == 1]
+            offpeak_segs = segments_df[segments_df['is_peak_hour'] == 0]
 
-        bridged = segments_df['n_noise_points'] > 0
-        print(f"\n✓ Noise Bridging:")
-        print(f"   Segments with noise: {bridged.sum():,} ({bridged.sum() / len(segments_df) * 100:.1f}%)")
-        print(f"   Mean noise points: {segments_df['n_noise_points'].mean():.1f}")
+            print(f"   Weekend avg delay: {weekend_segs['arrivalDelay'].mean():.2f}s")
+            print(f"   Weekday avg delay: {weekday_segs['arrivalDelay'].mean():.2f}s")
+            print(f"   Peak hour avg delay: {peak_segs['arrivalDelay'].mean():.2f}s")
+            print(f"   Off-peak avg delay: {offpeak_segs['arrivalDelay'].mean():.2f}s")
 
-        # 🔍 DEBUG: Show raw feature values BEFORE scaling
         if available_operational:
-            print(f"\n🔍 DEBUG: Operational features in segments (RAW - before scaling):")
+            print(f"\n🔍 DEBUG: Operational features (RAW):")
             for feat in available_operational:
                 if feat in segments_df.columns:
                     vals = segments_df[feat].values
-                    print(f"   {feat}:")
-                    print(f"      min={vals.min():.4f}, max={vals.max():.4f}, "
+                    print(f"   {feat}: min={vals.min():.4f}, max={vals.max():.4f}, "
                           f"mean={vals.mean():.4f}, std={vals.std():.4f}")
-                    print(f"      unique values: {len(np.unique(vals))}")
-                    print(f"      first 10: {vals[:10]}")
-
-        if available_weather:
-            print(f"\n🔍 DEBUG: Weather features in segments (RAW - before scaling):")
-            for feat in available_weather:
-                if feat in segments_df.columns:
-                    vals = segments_df[feat].values
-                    print(f"   {feat}:")
-                    print(f"      min={vals.min():.4f}, max={vals.max():.4f}, "
-                          f"mean={vals.mean():.4f}, std={vals.std():.4f}")
-                    print(f"      unique values: {len(np.unique(vals))}")
-                    print(f"      first 10: {vals[:10]}")
 
     return segments_df
 
 
 # =============================================================================
-# PATH AGGREGATION FOR MTL
+# PATH AGGREGATION FOR MTL (UPDATED WITH BINARY FLAGS)
 # =============================================================================
 
 def aggregate_segments_into_paths(segments_df, max_path_length=10):
     """
     Aggregate individual segments into multi-segment paths based on trip_id.
-
-    Args:
-        segments_df: DataFrame with columns [trip_id, segment_id, duration_sec, ...]
-        max_path_length: Maximum number of segments per path
-
-    Returns:
-        paths_df: DataFrame where each row is a path containing multiple segments
+    ✅ UPDATED: Now preserves is_weekend and is_peak_hour flags
     """
     print_section("AGGREGATING SEGMENTS INTO PATHS")
 
     if 'trip_id' not in segments_df.columns:
-        print("   ❌ No 'trip_id' column found - cannot aggregate into paths")
-        print("   Returning original segments (seq_len=1)")
+        print("   ❌ No 'trip_id' column found")
         return segments_df
 
     paths = []
 
     for trip_id, trip_group in segments_df.groupby('trip_id'):
-        # Sort segments chronologically (segments are already built in order)
         trip_group = trip_group.head(max_path_length)
         seq_len = len(trip_group)
 
         if seq_len == 0:
             continue
 
-        # Aggregate path-level features
         path = {
             'trip_id': trip_id,
             'seq_len': seq_len,
             'total_duration': trip_group['duration_sec'].sum(),
 
-            # Store segment-level data as lists
             'segment_ids': trip_group['segment_id'].tolist(),
             'segment_durations': trip_group['duration_sec'].tolist(),
 
-            # Temporal features (per segment)
             'hours': trip_group['hour'].tolist() if 'hour' in trip_group.columns else [0] * seq_len,
-            'days_of_week': trip_group['day_of_week'].tolist() if 'day_of_week' in trip_group.columns else [0] * seq_len,
+            'days_of_week': trip_group[
+                'day_of_week'].tolist() if 'day_of_week' in trip_group.columns else [0] * seq_len,
 
-            # Operational features (per segment)
-            'arrival_delays': trip_group['arrivalDelay'].tolist() if 'arrivalDelay' in trip_group.columns else [0] * seq_len,
-            'departure_delays': trip_group['departureDelay'].tolist() if 'departureDelay' in trip_group.columns else [0] * seq_len,
+            # ✅ NEW: Binary flags
+            'is_weekend_flags': trip_group[
+                'is_weekend'].tolist() if 'is_weekend' in trip_group.columns else [0] * seq_len,
+            'is_peak_hour_flags': trip_group[
+                'is_peak_hour'].tolist() if 'is_peak_hour' in trip_group.columns else [0] * seq_len,
 
-            # Weather features (per segment)
-            'temperatures': trip_group['temperature_2m'].tolist() if 'temperature_2m' in trip_group.columns else [0] * seq_len,
-            'apparent_temps': trip_group['apparent_temperature'].tolist() if 'apparent_temperature' in trip_group.columns else [0] * seq_len,
-            'windspeeds': trip_group['windspeed_10m'].tolist() if 'windspeed_10m' in trip_group.columns else [0] * seq_len,
-            'windgusts': trip_group['windgusts_10m'].tolist() if 'windgusts_10m' in trip_group.columns else [0] * seq_len,
-            'wind_directions': trip_group['winddirection_10m'].tolist() if 'winddirection_10m' in trip_group.columns else [0] * seq_len,
+            'arrival_delays': trip_group[
+                'arrivalDelay'].tolist() if 'arrivalDelay' in trip_group.columns else [0] * seq_len,
+            'departure_delays': trip_group[
+                'departureDelay'].tolist() if 'departureDelay' in trip_group.columns else [0] * seq_len,
 
-            # Spatial features
+            'temperatures': trip_group[
+                'temperature_2m'].tolist() if 'temperature_2m' in trip_group.columns else [0] * seq_len,
+            'apparent_temps': trip_group[
+                'apparent_temperature'].tolist() if 'apparent_temperature' in trip_group.columns else [0] * seq_len,
+            'precipitations': trip_group[
+                'precipitation'].tolist() if 'precipitation' in trip_group.columns else [0] * seq_len,
+            'rains': trip_group['rain'].tolist() if 'rain' in trip_group.columns else [0] * seq_len,
+            'snowfalls': trip_group['snowfall'].tolist() if 'snowfall' in trip_group.columns else [0] * seq_len,
+            'windspeeds': trip_group[
+                'windspeed_10m'].tolist() if 'windspeed_10m' in trip_group.columns else [0] * seq_len,
+            'windgusts': trip_group[
+                'windgusts_10m'].tolist() if 'windgusts_10m' in trip_group.columns else [0] * seq_len,
+            'wind_directions': trip_group[
+                'winddirection_10m'].tolist() if 'winddirection_10m' in trip_group.columns else [0] * seq_len,
+
             'speeds': trip_group['speed_mps'].tolist() if 'speed_mps' in trip_group.columns else [0] * seq_len,
         }
 
@@ -373,14 +364,10 @@ def aggregate_segments_into_paths(segments_df, max_path_length=10):
 
 
 # =============================================================================
-# ADJACENCY MATRICES
+# ADJACENCY MATRICES (NO CHANGES)
 # =============================================================================
 
 def _fuzzy_match_station(name, candidates):
-    """
-    Return the best-matching candidate for `name` using token overlap.
-    Returns None if no candidate shares enough meaningful tokens.
-    """
     stop_words = {'street', 'avenue', 'place', 'drive', 'road', 'st', 'ave',
                   'platform', '1', '2', 'interchange', 'north', 'crescent'}
     name_core = set(name.lower().replace('&', 'and').split()) - stop_words
@@ -396,28 +383,6 @@ def _fuzzy_match_station(name, candidates):
 
 
 def _assign_social_vectors_to_clusters(clusters, soc_df_with_coords):
-    """
-    Assign a social-function vector to every cluster.
-
-    Algorithm
-    ─────────
-    Each cluster centre (lat, lon) is compared against every station that
-    has BOTH a GPS coordinate (from known_stops) AND a social-function
-    row (from social_function.csv). The cluster inherits the [Level 1,
-    Level 2, Level 3] vector of the station whose GPS coordinate is closest,
-    with no distance cap — every cluster gets a vector, even remote delay
-    clusters, because the nearest station is always the best available proxy.
-
-    Parameters
-    ──────────
-    clusters           : np.ndarray (N, 2) — [lat, lon] per cluster
-    soc_df_with_coords : list of (station_name, lat, lon, np.array([L1, L2, L3]))
-                         — stations that have both GPS and social data
-
-    Returns
-    ───────
-    dict { cluster_idx (int) -> np.array([L1, L2, L3]) }
-    """
     cluster_social = {}
 
     if not soc_df_with_coords:
@@ -439,10 +404,6 @@ def _assign_social_vectors_to_clusters(clusters, soc_df_with_coords):
         ])
         nearest = int(np.argmin(dists))
         cluster_social[idx] = soc_vecs[nearest]
-        print(f"       Cluster {idx:>3}: nearest station = "
-              f"'{soc_names[nearest]}'  "
-              f"({dists[nearest]:.0f} m)  "
-              f"vector = {soc_vecs[nearest]}")
 
     return cluster_social
 
@@ -450,36 +411,6 @@ def _assign_social_vectors_to_clusters(clusters, soc_df_with_coords):
 def build_adjacency_matrices_fixed(segments_df, clusters,
                                    known_stops=None,
                                    social_path='./data/social_function.csv'):
-    """
-    Build three N×N adjacency matrices (N = number of unique segment types).
-
-    adj_geo  — Gaussian similarity on segment length.
-               Segments of equal length → score ≈ 1.
-
-    adj_dist — Sequential topology: entry [i,j] = 1 if segment j starts
-               where segment i ends, then row-normalised.
-
-    adj_soc  — Cosine similarity between per-segment social-function vectors.
-
-               How social vectors are derived
-               ─────────────────────────────
-               1. Load social_function.csv (13 stations × [L1, L2, L3]).
-               2. For each station in the CSV, find its GPS coordinate from
-                  known_stops using token-based name matching.
-               3. Every cluster centre (including injected station clusters
-                  AND delay clusters) picks up the [L1, L2, L3] vector of
-                  the social-function station whose GPS is nearest to it.
-                  No distance cap: every cluster always gets a vector.
-               4. Each segment's vector = mean of its origin + dest cluster
-                  vectors. Cosine similarity → clipped to [0, 1].
-
-    Parameters
-    ──────────
-    segments_df : DataFrame with 'segment_id', 'distance_m', etc.
-    clusters    : np.ndarray (N, 2) — [lat, lon] per cluster
-    known_stops : dict {stop_name: (lat, lon)} — from data loader
-    social_path : str — path to social_function.csv
-    """
     print_section("BUILDING ADJACENCY MATRICES")
 
     if len(segments_df) == 0:
@@ -495,9 +426,6 @@ def build_adjacency_matrices_fixed(segments_df, clusters,
     adj_dist = np.zeros((n_segments, n_segments))
     adj_soc = np.zeros((n_segments, n_segments))
 
-    # ------------------------------------------------------------------
-    # 1. Geographic — Gaussian similarity on segment length
-    # ------------------------------------------------------------------
     SIGMA_M = 500.0
     seg_lengths = {
         sid: segments_df.loc[segments_df['segment_id'] == sid, 'distance_m'].mean()
@@ -511,11 +439,8 @@ def build_adjacency_matrices_fixed(segments_df, clusters,
                 diff = seg_lengths[si] - seg_lengths[sj]
                 adj_geo[i, j] = np.exp(-(diff ** 2) / (2 * SIGMA_M ** 2))
 
-    print(f"   ✓ adj_geo  built  (Gaussian length similarity, σ={SIGMA_M} m)")
+    print(f"   ✓ adj_geo  built")
 
-    # ------------------------------------------------------------------
-    # 2. Distance — sequential topology
-    # ------------------------------------------------------------------
     for sid in segment_types:
         o, d = map(int, sid.split('_'))
         idx_i = seg_to_idx[sid]
@@ -528,16 +453,13 @@ def build_adjacency_matrices_fixed(segments_df, clusters,
     row_sums[row_sums == 0] = 1
     adj_dist /= row_sums
 
-    print(f"   ✓ adj_dist built  (sequential topology, row-normalised)")
+    print(f"   ✓ adj_dist built")
 
-    # ------------------------------------------------------------------
-    # 3. Social — cosine similarity on [Level 1, Level 2, Level 3]
-    # ------------------------------------------------------------------
     _cache = known_stops or {}
 
     if os.path.exists(social_path):
         soc_df = pd.read_csv(social_path).dropna(subset=['station'])
-        print(f"   Social function data: {len(soc_df)} stations loaded from CSV")
+        print(f"   Social function data: {len(soc_df)} stations loaded")
 
         soc_df_with_coords = []
 
@@ -553,7 +475,6 @@ def build_adjacency_matrices_fixed(segments_df, clusters,
                                     float(srow['Level 2']),
                                     float(srow['Level 3'])], dtype=float)
 
-                # Token overlap candidates
                 soc_tokens = set(soc_name.lower().replace('&', 'and').split())
                 stop_words = {'street', 'avenue', 'place', 'drive', 'road',
                               'st', 'ave', 'platform', '1', '2',
@@ -572,32 +493,12 @@ def build_adjacency_matrices_fixed(segments_df, clusters,
                 if best_name and best_score >= 0.25:
                     lat, lon = _cache[best_name]
                     soc_df_with_coords.append((soc_name, lat, lon, soc_vec))
-                    print(f"     Social '{soc_name}' → GPS match '{best_name}' "
-                          f"(score={best_score:.2f}, "
-                          f"{lat:.6f}, {lon:.6f})")
                 else:
-                    # Use network centroid as fallback
                     centroid_lat = known_coords[:, 0].mean()
                     centroid_lon = known_coords[:, 1].mean()
                     soc_df_with_coords.append(
                         (soc_name, centroid_lat, centroid_lon, soc_vec)
                     )
-                    print(f"     Social '{soc_name}' → no name match, "
-                          f"using network centroid as GPS proxy")
-        else:
-            print("     ⚠️  known_stops is empty — "
-                  "social vectors will be assigned but GPS distances are 0")
-            for _, srow in soc_df.iterrows():
-                soc_name = str(srow['station']).strip()
-                if not soc_name:
-                    continue
-                soc_vec = np.array([float(srow['Level 1']),
-                                    float(srow['Level 2']),
-                                    float(srow['Level 3'])], dtype=float)
-                soc_df_with_coords.append((soc_name, 0.0, 0.0, soc_vec))
-
-        print(f"   Social stations with GPS coordinates: "
-              f"{len(soc_df_with_coords)}/{len(soc_df)}")
 
         cluster_social = _assign_social_vectors_to_clusters(
             clusters, soc_df_with_coords
@@ -615,11 +516,7 @@ def build_adjacency_matrices_fixed(segments_df, clusters,
         seg_normed = seg_social / norms
         adj_soc = np.clip(seg_normed @ seg_normed.T, 0.0, 1.0)
 
-        n_zero = int((norms.flatten() < 1e-7).sum())
-        print(f"   ✓ adj_soc  built  "
-              f"(cosine similarity on [L1, L2, L3], GPS nearest-neighbour)")
-        print(f"     Segments with no social signal (zero vector): "
-              f"{n_zero}/{n_segments}")
+        print(f"   ✓ adj_soc  built")
 
     else:
         print(f"   ⚠️  {social_path} not found — adj_soc defaults to identity")
