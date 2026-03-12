@@ -20,7 +20,7 @@ class Config:
     # =============================================================================
 
     # Sampling
-    sample_fraction = 0.2  # Use all data (or 0.1 for 10% sample)
+    sample_fraction = 0.6  # Use all data (or 0.1 for 10% sample)
 
     # Training
     n_iterations = 1  # Number of complete training runs
@@ -54,7 +54,8 @@ class Config:
     dropout = 0.3  # Dropout rate
 
     # MTL
-    mtl_lambda = 0.5  # Multi-task learning weight (individual vs collective)
+    mtl_lambda = 0.5  # Initial balance for uncertainty weighting
+
 
     # =============================================================================
     # DEVICE

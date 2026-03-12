@@ -3,13 +3,15 @@ main.py
 =======
 Entry point for MAGNN-LSTM transit travel time prediction.
 
-✅ TWO MODEL COMPARISON:
+✅ THREE MODEL COMPARISON:
    1. MAGNN (baseline)
    2. MAGNN-LSTM-Residual (fixed version with residual learning + adaptive gating)
+   3. MAGNN-LSTM-DualTaskMTL (✅ NEW: Local segments + Global stations)
 
 Usage:
     python main.py                  # Train MAGNN only (baseline)
-    python main.py --compare        # Compare MAGNN vs MAGNN-LSTM-Residual
+    python main.py --compare-all    # Compare all three models
+    python main.py --ablation       # Feature ablation studies
 
 HOW TO SWITCH CLUSTERING METHOD
 --------------------------------
@@ -42,6 +44,9 @@ from visualizations import (plot_clusters, plot_segments,
 from model import (SegmentDataset, masked_collate_fn,
                    train_magtte, SimpleMLP, train_simple,
                    EnhancedSegmentDataset, enhanced_collate_fn,
+                   PathDataset, path_collate_fn,
+                   train_magnn_lstm_mtl,
+                   train_magnn_lstm_dualtask_mtl,  # ✅ NEW
                    MAGTTE)
 from residual import MAGNN_LSTM_Residual
 
@@ -497,20 +502,21 @@ def train_magnn_lstm_residual(train_loader, val_loader, test_loader,
 
 
 # =============================================================================
-# TWO-WAY COMPARISON HELPER
+# THREE-WAY COMPARISON HELPER
 # =============================================================================
 
-def print_comparison_table(magnn_results, residual_results, split_name):
-    """Print formatted two-way comparison table."""
+def print_three_way_comparison_table(magnn_results, residual_results, mtl_results, split_name):
+    """Print formatted three-way comparison table."""
 
     magnn_m = magnn_results.get(split_name, {})
     residual_m = residual_results.get(split_name, {})
+    mtl_m = mtl_results.get(split_name, {})
 
-    print(f"\n{'=' * 100}")
-    print(f"{split_name.upper()} SET - COMPARISON")
-    print(f"{'=' * 100}")
-    print(f"{'Metric':<10} {'MAGNN':<20} {'Residual':<20} {'Improvement':<20} {'Winner':<15}")
-    print(f"{'-' * 100}")
+    print(f"\n{'=' * 120}")
+    print(f"{split_name.upper()} SET - THREE-WAY COMPARISON")
+    print(f"{'=' * 120}")
+    print(f"{'Metric':<10} {'MAGNN':<20} {'Residual':<20} {'DualTaskMTL':<20} {'Best Model':<20} {'Improvement':<15}")
+    print(f"{'-' * 120}")
 
     metrics_info = [
         ('R²', 'r2', True),
@@ -522,69 +528,92 @@ def print_comparison_table(magnn_results, residual_results, split_name):
     for display_name, metric_key, higher_is_better in metrics_info:
         magnn_val = magnn_m.get(metric_key, float('nan'))
         residual_val = residual_m.get(metric_key, float('nan'))
+        mtl_val = mtl_m.get(metric_key, float('nan'))
 
         if metric_key in ['rmse', 'mae']:
             magnn_str = f"{magnn_val:.2f}s"
             residual_str = f"{residual_val:.2f}s"
+            mtl_str = f"{mtl_val:.2f}s"
         elif metric_key == 'mape':
             magnn_str = f"{magnn_val:.2f}%"
             residual_str = f"{residual_val:.2f}%"
+            mtl_str = f"{mtl_val:.2f}%"
         else:
             magnn_str = f"{magnn_val:.4f}"
             residual_str = f"{residual_val:.4f}"
+            mtl_str = f"{mtl_val:.4f}"
 
-        if not (np.isnan(magnn_val) or np.isnan(residual_val)):
+        if not (np.isnan(magnn_val) or np.isnan(residual_val) or np.isnan(mtl_val)):
             if higher_is_better:
-                improvement = ((residual_val - magnn_val) / abs(magnn_val) * 100)
-                winner = "Residual ✓" if residual_val > magnn_val else "MAGNN"
+                best_val = max(magnn_val, residual_val, mtl_val)
+                if best_val == residual_val:
+                    best_model = "Residual ✓"
+                    improvement = ((residual_val - magnn_val) / abs(magnn_val) * 100)
+                elif best_val == mtl_val:
+                    best_model = "DualTaskMTL ✓"
+                    improvement = ((mtl_val - magnn_val) / abs(magnn_val) * 100)
+                else:
+                    best_model = "MAGNN (baseline)"
+                    improvement = 0.0
             else:
-                improvement = ((magnn_val - residual_val) / abs(magnn_val) * 100)
-                winner = "Residual ✓" if residual_val < magnn_val else "MAGNN"
+                best_val = min(magnn_val, residual_val, mtl_val)
+                if best_val == residual_val:
+                    best_model = "Residual ✓"
+                    improvement = ((magnn_val - residual_val) / abs(magnn_val) * 100)
+                elif best_val == mtl_val:
+                    best_model = "DualTaskMTL ✓"
+                    improvement = ((magnn_val - mtl_val) / abs(magnn_val) * 100)
+                else:
+                    best_model = "MAGNN (baseline)"
+                    improvement = 0.0
 
             improvement_str = f"+{improvement:.2f}%" if improvement > 0 else f"{improvement:.2f}%"
         else:
+            best_model = "N/A"
             improvement_str = "N/A"
-            winner = "N/A"
 
-        print(f"{display_name:<10} {magnn_str:<20} {residual_str:<20} {improvement_str:<20} {winner:<15}")
+        print(
+            f"{display_name:<10} {magnn_str:<20} {residual_str:<20} {mtl_str:<20} {best_model:<20} {improvement_str:<15}")
 
-    print(f"{'=' * 100}\n")
+    print(f"{'=' * 120}\n")
 
 
 # =============================================================================
-# TWO-WAY COMPARISON MODE
+# THREE-WAY COMPARISON MODE (✅ UPDATED WITH DUALTASK MTL)
 # =============================================================================
 
-def main_with_comparison():
-    """Two-way comparison: MAGNN vs MAGNN-LSTM-Residual"""
+def main_with_three_way_comparison():
+    """Three-way comparison: MAGNN vs MAGNN-LSTM-Residual vs MAGNN-LSTM-DualTaskMTL"""
 
     config = Config()
 
-    print_section("🔬 TWO-WAY COMPARISON MODE")
+    print_section("🔬 THREE-WAY COMPARISON MODE")
     print(f"  Device: {DEVICE}")
     print(f"  Algorithm: {ALGORITHM_NAME}")
     print(f"\n  Models to compare:")
     print(f"    1. MAGNN (baseline)")
-    print(f"    2. MAGNN-LSTM-Residual (✅ fixed + residual learning + adaptive gate)")
-    print(f"\n  Residual model features:")
-    print(f"    ✅ Weather features properly scaled")
-    print(f"    ✅ LSTM sees MAGNN prediction (residual learning)")
-    print(f"    ✅ Adaptive gating (learns α per sample)")
-    print(f"    ✅ Binary flags: is_weekend, is_peak_hour")
+    print(f"    2. MAGNN-LSTM-Residual (residual learning + adaptive gate)")
+    print(f"    3. MAGNN-LSTM-DualTaskMTL (✅ NEW: Local + Global tasks)")
+    print(f"\n  DualTaskMTL features:")
+    print(f"    ✅ Uses segment-level data (45K+ samples, not 2K paths)")
+    print(f"    ✅ Local task: Predict individual segment durations")
+    print(f"    ✅ Global task: Predict total journey time")
+    print(f"    ✅ Uncertainty weighting: Auto-balance both tasks")
     print("=" * 80)
 
     all_magnn_results = []
     all_residual_results = []
+    all_mtl_results = []
 
     for iteration in range(1, config.n_iterations + 1):
         print_section(f"🔄 ITERATION {iteration}/{config.n_iterations}")
 
         timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
-        output_folder = f"outputs/{ALGORITHM_NAME}_{timestamp}_i{iteration}_comparison"
+        output_folder = f"outputs/{ALGORITHM_NAME}_{timestamp}_i{iteration}_three_way"
         os.makedirs(output_folder, exist_ok=True)
 
         try:
-            print("\n[1/8] Loading data...")
+            print("\n[1/10] Loading data...")
             train_df, test_df, val_df = load_train_test_val_data_fixed(
                 data_folder=config.data_folder,
                 sample_fraction=config.sample_fraction
@@ -595,22 +624,22 @@ def main_with_comparison():
             known_stops_val = get_known_stops(val_df)
             known_stops = {**known_stops_test, **known_stops_val, **known_stops_train}
 
-            print("[2/8] Clustering stops...")
+            print("[2/10] Clustering stops...")
             clusters, station_cluster_ids = event_driven_clustering_fixed(
                 train_df, known_stops=known_stops
             )
 
-            print("[3/8] Building segments...")
+            print("[3/10] Building segments...")
             train_segments = build_segments_fixed(train_df, clusters)
             test_segments = build_segments_fixed(test_df, clusters)
             val_segments = build_segments_fixed(val_df, clusters)
 
-            print("[4/8] Building adjacency matrices...")
+            print("[4/10] Building adjacency matrices...")
             adj_geo, adj_dist, adj_soc, segment_types = build_adjacency_matrices_fixed(
                 train_segments, clusters, known_stops=known_stops
             )
 
-            print("[5/8] Preparing MAGNN datasets...")
+            print("[5/10] Preparing MAGNN datasets...")
             train_dataset_magnn = SegmentDataset(train_segments, segment_types, fit_scalers=True)
             val_dataset_magnn = SegmentDataset(val_segments, segment_types, fit_scalers=False,
                                                target_scaler=train_dataset_magnn.target_scaler,
@@ -626,27 +655,32 @@ def main_with_comparison():
             test_loader_magnn = DataLoader(test_dataset_magnn, batch_size=config.batch_size,
                                            shuffle=False, num_workers=0, collate_fn=masked_collate_fn)
 
-            print("[6/8] Preparing Residual datasets...")
-            train_dataset_residual = EnhancedSegmentDataset(train_segments, segment_types, fit_scalers=True)
-            val_dataset_residual = EnhancedSegmentDataset(val_segments, segment_types, fit_scalers=False,
-                                                          target_scaler=train_dataset_residual.target_scaler,
-                                                          speed_scaler=train_dataset_residual.speed_scaler,
-                                                          operational_scaler=train_dataset_residual.operational_scaler,
-                                                          weather_scaler=train_dataset_residual.weather_scaler)
-            test_dataset_residual = EnhancedSegmentDataset(test_segments, segment_types, fit_scalers=False,
-                                                           target_scaler=train_dataset_residual.target_scaler,
-                                                           speed_scaler=train_dataset_residual.speed_scaler,
-                                                           operational_scaler=train_dataset_residual.operational_scaler,
-                                                           weather_scaler=train_dataset_residual.weather_scaler)
+            print("[6/10] Preparing Enhanced datasets (for Residual & DualTaskMTL)...")
+            train_dataset_enhanced = EnhancedSegmentDataset(train_segments, segment_types, fit_scalers=True)
+            val_dataset_enhanced = EnhancedSegmentDataset(val_segments, segment_types, fit_scalers=False,
+                                                          target_scaler=train_dataset_enhanced.target_scaler,
+                                                          speed_scaler=train_dataset_enhanced.speed_scaler,
+                                                          operational_scaler=train_dataset_enhanced.operational_scaler,
+                                                          weather_scaler=train_dataset_enhanced.weather_scaler)
+            test_dataset_enhanced = EnhancedSegmentDataset(test_segments, segment_types, fit_scalers=False,
+                                                           target_scaler=train_dataset_enhanced.target_scaler,
+                                                           speed_scaler=train_dataset_enhanced.speed_scaler,
+                                                           operational_scaler=train_dataset_enhanced.operational_scaler,
+                                                           weather_scaler=train_dataset_enhanced.weather_scaler)
 
-            train_loader_residual = DataLoader(train_dataset_residual, batch_size=config.batch_size,
+            train_loader_enhanced = DataLoader(train_dataset_enhanced, batch_size=config.batch_size,
                                                shuffle=True, num_workers=0, collate_fn=enhanced_collate_fn)
-            val_loader_residual = DataLoader(val_dataset_residual, batch_size=config.batch_size,
+            val_loader_enhanced = DataLoader(val_dataset_enhanced, batch_size=config.batch_size,
                                              shuffle=False, num_workers=0, collate_fn=enhanced_collate_fn)
-            test_loader_residual = DataLoader(test_dataset_residual, batch_size=config.batch_size,
+            test_loader_enhanced = DataLoader(test_dataset_enhanced, batch_size=config.batch_size,
                                               shuffle=False, num_workers=0, collate_fn=enhanced_collate_fn)
 
-            print("\n[7/8] Training MAGNN (baseline)...")
+            print(f"\n📊 Dataset Summary:")
+            print(f"   Training segments: {len(train_dataset_enhanced):,}")
+            print(f"   Validation segments: {len(val_dataset_enhanced):,}")
+            print(f"   Test segments: {len(test_dataset_enhanced):,}")
+
+            print("\n[7/10] Training MAGNN (baseline)...")
             print("-" * 80)
             magnn_results, magnn_model = train_magtte(
                 train_loader_magnn, val_loader_magnn, test_loader_magnn,
@@ -657,22 +691,36 @@ def main_with_comparison():
             all_magnn_results.append(magnn_results)
             magnn_checkpoint = os.path.join(output_folder, 'magtte_best.pth')
 
-            print("\n[8/8] Training MAGNN-LSTM-Residual...")
+            print("\n[8/10] Training MAGNN-LSTM-Residual...")
             print("-" * 80)
             residual_results, residual_model = train_magnn_lstm_residual(
-                train_loader_residual, val_loader_residual, test_loader_residual,
+                train_loader_enhanced, val_loader_enhanced, test_loader_enhanced,
                 adj_geo, adj_dist, adj_soc,
-                segment_types, train_dataset_residual.target_scaler,
+                segment_types, train_dataset_enhanced.target_scaler,
                 output_folder, DEVICE, config,
                 pretrained_magnn_path=magnn_checkpoint,
                 freeze_magnn=True
             )
             all_residual_results.append(residual_results)
 
-            print_section(f"📊 ITERATION {iteration} - COMPARISON")
+            # ✅ NEW: DualTaskMTL using SEGMENT data (not paths!)
+            print("\n[9/10] Training MAGNN-LSTM-DualTaskMTL (Local + Global)...")
+            print("-" * 80)
+            mtl_results, mtl_model = train_magnn_lstm_dualtask_mtl(
+                train_loader_enhanced, val_loader_enhanced, test_loader_enhanced,
+                adj_geo, adj_dist, adj_soc,
+                segment_types, train_dataset_enhanced.target_scaler,
+                output_folder, DEVICE, config,
+                pretrained_magnn_path=magnn_checkpoint,
+                freeze_magnn=True
+            )
+            all_mtl_results.append(mtl_results)
+
+            print("\n[10/10] Generating comparison report...")
+            print_section(f"📊 ITERATION {iteration} - THREE-WAY COMPARISON")
 
             for split in ['Train', 'Val', 'Test']:
-                print_comparison_table(magnn_results, residual_results, split)
+                print_three_way_comparison_table(magnn_results, residual_results, mtl_results, split)
 
             comparison_json = {
                 'iteration': iteration,
@@ -695,9 +743,15 @@ def main_with_comparison():
                             if k in ['r2', 'rmse', 'mae', 'mape', 'alpha']}
                     for split in ['Train', 'Val', 'Test']
                 },
+                'dualtask_mtl': {
+                    split: {k: float(v) if isinstance(v, (int, float, np.number)) else str(v)
+                            for k, v in mtl_results.get(split, {}).items()
+                            if k in ['r2', 'rmse', 'mae', 'mape']}
+                    for split in ['Train', 'Val', 'Test']
+                },
             }
 
-            json_path = os.path.join(output_folder, 'comparison.json')
+            json_path = os.path.join(output_folder, 'three_way_comparison.json')
             with open(json_path, 'w') as f:
                 json.dump(comparison_json, f, indent=2)
             print(f"✓ Comparison saved → {json_path}\n")
@@ -709,15 +763,15 @@ def main_with_comparison():
             continue
 
     # Final summary
-    if all_magnn_results and all_residual_results:
+    if all_magnn_results and all_residual_results and all_mtl_results:
         print_section("🏆 FINAL SUMMARY - AVERAGED ACROSS ALL ITERATIONS")
 
         for split in ['Train', 'Val', 'Test']:
-            print(f"\n{'=' * 100}")
+            print(f"\n{'=' * 120}")
             print(f"{split.upper()} SET - AVERAGE OVER {len(all_magnn_results)} ITERATION(S)")
-            print(f"{'=' * 100}")
-            print(f"{'Metric':<10} {'MAGNN':<25} {'Residual':<25} {'Best':<15}")
-            print(f"{'-' * 100}")
+            print(f"{'=' * 120}")
+            print(f"{'Metric':<10} {'MAGNN':<20} {'Residual':<20} {'DualTaskMTL':<20} {'Best':<15}")
+            print(f"{'-' * 120}")
 
             metrics_info = [
                 ('R²', 'r2', True),
@@ -729,42 +783,668 @@ def main_with_comparison():
             for display_name, metric_key, higher_is_better in metrics_info:
                 magnn_vals = [r.get(split, {}).get(metric_key, float('nan')) for r in all_magnn_results]
                 residual_vals = [r.get(split, {}).get(metric_key, float('nan')) for r in all_residual_results]
+                mtl_vals = [r.get(split, {}).get(metric_key, float('nan')) for r in all_mtl_results]
 
                 magnn_avg = np.nanmean(magnn_vals)
                 residual_avg = np.nanmean(residual_vals)
+                mtl_avg = np.nanmean(mtl_vals)
 
                 magnn_std = np.nanstd(magnn_vals)
                 residual_std = np.nanstd(residual_vals)
+                mtl_std = np.nanstd(mtl_vals)
 
                 if metric_key in ['rmse', 'mae']:
                     magnn_str = f"{magnn_avg:.2f}±{magnn_std:.2f}s"
                     residual_str = f"{residual_avg:.2f}±{residual_std:.2f}s"
+                    mtl_str = f"{mtl_avg:.2f}±{mtl_std:.2f}s"
                 elif metric_key == 'mape':
                     magnn_str = f"{magnn_avg:.2f}±{magnn_std:.2f}%"
                     residual_str = f"{residual_avg:.2f}±{residual_std:.2f}%"
+                    mtl_str = f"{mtl_avg:.2f}±{mtl_std:.2f}%"
                 else:
                     magnn_str = f"{magnn_avg:.4f}±{magnn_std:.4f}"
                     residual_str = f"{residual_avg:.4f}±{residual_std:.4f}"
+                    mtl_str = f"{mtl_avg:.4f}±{mtl_std:.4f}"
 
-                if not any(np.isnan(v) for v in [magnn_avg, residual_avg]):
+                if not any(np.isnan(v) for v in [magnn_avg, residual_avg, mtl_avg]):
                     if higher_is_better:
-                        best_model = "Residual ✓" if residual_avg > magnn_avg else "MAGNN"
+                        best_val = max(magnn_avg, residual_avg, mtl_avg)
+                        if best_val == residual_avg:
+                            best_model = "Residual ✓"
+                        elif best_val == mtl_avg:
+                            best_model = "DualTaskMTL ✓"
+                        else:
+                            best_model = "MAGNN"
                     else:
-                        best_model = "Residual ✓" if residual_avg < magnn_avg else "MAGNN"
+                        best_val = min(magnn_avg, residual_avg, mtl_avg)
+                        if best_val == residual_avg:
+                            best_model = "Residual ✓"
+                        elif best_val == mtl_avg:
+                            best_model = "DualTaskMTL ✓"
+                        else:
+                            best_model = "MAGNN"
                 else:
                     best_model = "N/A"
 
-                print(f"{display_name:<10} {magnn_str:<25} {residual_str:<25} {best_model:<15}")
+                print(f"{display_name:<10} {magnn_str:<20} {residual_str:<20} {mtl_str:<20} {best_model:<15}")
 
-            print(f"{'=' * 100}\n")
+            print(f"{'=' * 120}\n")
 
-        print_section("✅ COMPARISON COMPLETE")
+        print_section("✅ THREE-WAY COMPARISON COMPLETE")
         print(f"  Total iterations: {len(all_magnn_results)}")
         print(f"\n  Model Details:")
         print(f"    MAGNN: Graph attention + LSTM baseline")
-        print(f"    MAGNN-LSTM-Residual: ✅ Fixed + residual learning + adaptive gate")
-        print(f"\n  Results saved in: outputs/{ALGORITHM_NAME}_*_comparison/")
+        print(f"    MAGNN-LSTM-Residual: Residual learning + adaptive gate")
+        print(f"    MAGNN-LSTM-DualTaskMTL: Local segments + Global stations (NEW!)")
+        print(f"\n  Results saved in: outputs/{ALGORITHM_NAME}_*_three_way/")
         print("=" * 80)
+
+
+# =============================================================================
+# ABLATION STUDY MODE
+# =============================================================================
+
+def main_with_ablation_study():
+    """Ablation study: Feature importance analysis using MAGNN-LSTM-Residual."""
+
+    config = Config()
+
+    print_section("🔬 ABLATION STUDY MODE")
+    print(f"  Device: {DEVICE}")
+    print(f"  Algorithm: {ALGORITHM_NAME}")
+    print(f"  Data sampling: {config.sample_fraction * 100}%")
+    print(f"\n  Models to compare:")
+    print(f"    1. MAGNN-LSTM-Residual (Full) - All features")
+    print(f"    2. MAGNN-LSTM-Residual (No Operational) - Remove delay features")
+    print(f"    3. MAGNN-LSTM-Residual (No Weather) - Remove weather features")
+    print(f"    4. MAGNN-LSTM-Residual (Baseline) - Only spatial + temporal")
+    print("=" * 80)
+
+    all_full_results = []
+    all_no_operational_results = []
+    all_no_weather_results = []
+    all_baseline_results = []
+
+    for iteration in range(1, config.n_iterations + 1):
+        print_section(f"🔄 ITERATION {iteration}/{config.n_iterations}")
+
+        timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+        output_folder = f"outputs/{ALGORITHM_NAME}_{timestamp}_i{iteration}_ablation"
+        os.makedirs(output_folder, exist_ok=True)
+
+        try:
+            print("\n[1/9] Loading data...")
+            train_df, test_df, val_df = load_train_test_val_data_fixed(
+                data_folder=config.data_folder,
+                sample_fraction=config.sample_fraction
+            )
+
+            known_stops_train = get_known_stops(train_df)
+            known_stops_test = get_known_stops(test_df)
+            known_stops_val = get_known_stops(val_df)
+            known_stops = {**known_stops_test, **known_stops_val, **known_stops_train}
+            print(f"   Known stops: {len(known_stops)}")
+
+            print("[2/9] Clustering stops...")
+            clusters, station_cluster_ids = event_driven_clustering_fixed(
+                train_df, known_stops=known_stops
+            )
+
+            print("[3/9] Building segments...")
+            train_segments = build_segments_fixed(train_df, clusters)
+            test_segments = build_segments_fixed(test_df, clusters)
+            val_segments = build_segments_fixed(val_df, clusters)
+
+            print("[4/9] Building adjacency matrices...")
+            adj_geo, adj_dist, adj_soc, segment_types = build_adjacency_matrices_fixed(
+                train_segments, clusters, known_stops=known_stops
+            )
+
+            # Train base MAGNN for transfer learning (used by all variants)
+            print("\n[5/9] Training base MAGNN for transfer learning...")
+            print("-" * 80)
+
+            train_dataset_magnn = SegmentDataset(train_segments, segment_types, fit_scalers=True)
+            val_dataset_magnn = SegmentDataset(
+                val_segments, segment_types, fit_scalers=False,
+                target_scaler=train_dataset_magnn.target_scaler,
+                speed_scaler=train_dataset_magnn.speed_scaler
+            )
+            test_dataset_magnn = SegmentDataset(
+                test_segments, segment_types, fit_scalers=False,
+                target_scaler=train_dataset_magnn.target_scaler,
+                speed_scaler=train_dataset_magnn.speed_scaler
+            )
+
+            train_loader_magnn = DataLoader(
+                train_dataset_magnn, batch_size=config.batch_size,
+                shuffle=True, num_workers=0, collate_fn=masked_collate_fn
+            )
+            val_loader_magnn = DataLoader(
+                val_dataset_magnn, batch_size=config.batch_size,
+                shuffle=False, num_workers=0, collate_fn=masked_collate_fn
+            )
+            test_loader_magnn = DataLoader(
+                test_dataset_magnn, batch_size=config.batch_size,
+                shuffle=False, num_workers=0, collate_fn=masked_collate_fn
+            )
+
+            _, magnn_model = train_magtte(
+                train_loader_magnn, val_loader_magnn, test_loader_magnn,
+                adj_geo, adj_dist, adj_soc,
+                segment_types, train_dataset_magnn.target_scaler,
+                output_folder, DEVICE, config
+            )
+            magnn_checkpoint = os.path.join(output_folder, 'magtte_best.pth')
+
+            # ================================================================
+            # VARIANT 1: FULL MODEL (All features)
+            # ================================================================
+            print("\n[6/9] Training MAGNN-LSTM-Residual (FULL - All features)...")
+            print("-" * 80)
+
+            train_dataset_full = EnhancedSegmentDataset(
+                train_segments, segment_types, fit_scalers=True
+            )
+            val_dataset_full = EnhancedSegmentDataset(
+                val_segments, segment_types, fit_scalers=False,
+                target_scaler=train_dataset_full.target_scaler,
+                speed_scaler=train_dataset_full.speed_scaler,
+                operational_scaler=train_dataset_full.operational_scaler,
+                weather_scaler=train_dataset_full.weather_scaler
+            )
+            test_dataset_full = EnhancedSegmentDataset(
+                test_segments, segment_types, fit_scalers=False,
+                target_scaler=train_dataset_full.target_scaler,
+                speed_scaler=train_dataset_full.speed_scaler,
+                operational_scaler=train_dataset_full.operational_scaler,
+                weather_scaler=train_dataset_full.weather_scaler
+            )
+
+            train_loader_full = DataLoader(
+                train_dataset_full, batch_size=config.batch_size,
+                shuffle=True, num_workers=0, collate_fn=enhanced_collate_fn
+            )
+            val_loader_full = DataLoader(
+                val_dataset_full, batch_size=config.batch_size,
+                shuffle=False, num_workers=0, collate_fn=enhanced_collate_fn
+            )
+            test_loader_full = DataLoader(
+                test_dataset_full, batch_size=config.batch_size,
+                shuffle=False, num_workers=0, collate_fn=enhanced_collate_fn
+            )
+
+            full_results, full_model = train_magnn_lstm_residual(
+                train_loader_full, val_loader_full, test_loader_full,
+                adj_geo, adj_dist, adj_soc,
+                segment_types, train_dataset_full.target_scaler,
+                output_folder, DEVICE, config,
+                pretrained_magnn_path=magnn_checkpoint,
+                freeze_magnn=True
+            )
+            all_full_results.append(full_results)
+            print(f"   ✓ Full model trained")
+
+            # ================================================================
+            # VARIANT 2: NO OPERATIONAL (Remove delay features)
+            # ================================================================
+            print("\n[7/9] Training MAGNN-LSTM-Residual (NO OPERATIONAL)...")
+            print("-" * 80)
+
+            # Create datasets with operational features zeroed out
+            train_segments_no_op = train_segments.copy()
+            val_segments_no_op = val_segments.copy()
+            test_segments_no_op = test_segments.copy()
+
+            # Zero out operational features
+            for df in [train_segments_no_op, val_segments_no_op, test_segments_no_op]:
+                df['arrivalDelay'] = 0.0
+                df['departureDelay'] = 0.0
+                df['is_weekend'] = 0.0
+                df['is_peak_hour'] = 0.0
+
+            train_dataset_no_op = EnhancedSegmentDataset(
+                train_segments_no_op, segment_types, fit_scalers=True
+            )
+            val_dataset_no_op = EnhancedSegmentDataset(
+                val_segments_no_op, segment_types, fit_scalers=False,
+                target_scaler=train_dataset_no_op.target_scaler,
+                speed_scaler=train_dataset_no_op.speed_scaler,
+                operational_scaler=train_dataset_no_op.operational_scaler,
+                weather_scaler=train_dataset_no_op.weather_scaler
+            )
+            test_dataset_no_op = EnhancedSegmentDataset(
+                test_segments_no_op, segment_types, fit_scalers=False,
+                target_scaler=train_dataset_no_op.target_scaler,
+                speed_scaler=train_dataset_no_op.speed_scaler,
+                operational_scaler=train_dataset_no_op.operational_scaler,
+                weather_scaler=train_dataset_no_op.weather_scaler
+            )
+
+            train_loader_no_op = DataLoader(
+                train_dataset_no_op, batch_size=config.batch_size,
+                shuffle=True, num_workers=0, collate_fn=enhanced_collate_fn
+            )
+            val_loader_no_op = DataLoader(
+                val_dataset_no_op, batch_size=config.batch_size,
+                shuffle=False, num_workers=0, collate_fn=enhanced_collate_fn
+            )
+            test_loader_no_op = DataLoader(
+                test_dataset_no_op, batch_size=config.batch_size,
+                shuffle=False, num_workers=0, collate_fn=enhanced_collate_fn
+            )
+
+            no_op_results, no_op_model = train_magnn_lstm_residual(
+                train_loader_no_op, val_loader_no_op, test_loader_no_op,
+                adj_geo, adj_dist, adj_soc,
+                segment_types, train_dataset_no_op.target_scaler,
+                output_folder, DEVICE, config,
+                pretrained_magnn_path=magnn_checkpoint,
+                freeze_magnn=True
+            )
+            all_no_operational_results.append(no_op_results)
+            print(f"   ✓ No operational model trained")
+
+            # ================================================================
+            # VARIANT 3: NO WEATHER (Remove weather features)
+            # ================================================================
+            print("\n[8/9] Training MAGNN-LSTM-Residual (NO WEATHER)...")
+            print("-" * 80)
+
+            # Create datasets with weather features zeroed out
+            train_segments_no_weather = train_segments.copy()
+            val_segments_no_weather = val_segments.copy()
+            test_segments_no_weather = test_segments.copy()
+
+            # Zero out weather features
+            weather_cols = ['temperature_2m', 'apparent_temperature', 'precipitation',
+                           'rain', 'snowfall', 'windspeed_10m', 'windgusts_10m',
+                           'winddirection_10m']
+            for df in [train_segments_no_weather, val_segments_no_weather, test_segments_no_weather]:
+                for col in weather_cols:
+                    if col in df.columns:
+                        df[col] = 0.0
+
+            train_dataset_no_weather = EnhancedSegmentDataset(
+                train_segments_no_weather, segment_types, fit_scalers=True
+            )
+            val_dataset_no_weather = EnhancedSegmentDataset(
+                val_segments_no_weather, segment_types, fit_scalers=False,
+                target_scaler=train_dataset_no_weather.target_scaler,
+                speed_scaler=train_dataset_no_weather.speed_scaler,
+                operational_scaler=train_dataset_no_weather.operational_scaler,
+                weather_scaler=train_dataset_no_weather.weather_scaler
+            )
+            test_dataset_no_weather = EnhancedSegmentDataset(
+                test_segments_no_weather, segment_types, fit_scalers=False,
+                target_scaler=train_dataset_no_weather.target_scaler,
+                speed_scaler=train_dataset_no_weather.speed_scaler,
+                operational_scaler=train_dataset_no_weather.operational_scaler,
+                weather_scaler=train_dataset_no_weather.weather_scaler
+            )
+
+            train_loader_no_weather = DataLoader(
+                train_dataset_no_weather, batch_size=config.batch_size,
+                shuffle=True, num_workers=0, collate_fn=enhanced_collate_fn
+            )
+            val_loader_no_weather = DataLoader(
+                val_dataset_no_weather, batch_size=config.batch_size,
+                shuffle=False, num_workers=0, collate_fn=enhanced_collate_fn
+            )
+            test_loader_no_weather = DataLoader(
+                test_dataset_no_weather, batch_size=config.batch_size,
+                shuffle=False, num_workers=0, collate_fn=enhanced_collate_fn
+            )
+
+            no_weather_results, no_weather_model = train_magnn_lstm_residual(
+                train_loader_no_weather, val_loader_no_weather, test_loader_no_weather,
+                adj_geo, adj_dist, adj_soc,
+                segment_types, train_dataset_no_weather.target_scaler,
+                output_folder, DEVICE, config,
+                pretrained_magnn_path=magnn_checkpoint,
+                freeze_magnn=True
+            )
+            all_no_weather_results.append(no_weather_results)
+            print(f"   ✓ No weather model trained")
+
+            # ================================================================
+            # VARIANT 4: BASELINE (Only spatial + temporal)
+            # ================================================================
+            print("\n[9/9] Training MAGNN-LSTM-Residual (BASELINE - spatial + temporal only)...")
+            print("-" * 80)
+
+            # Create datasets with both operational and weather features zeroed out
+            train_segments_baseline = train_segments.copy()
+            val_segments_baseline = val_segments.copy()
+            test_segments_baseline = test_segments.copy()
+
+            # Zero out ALL optional features
+            for df in [train_segments_baseline, val_segments_baseline, test_segments_baseline]:
+                # Operational
+                df['arrivalDelay'] = 0.0
+                df['departureDelay'] = 0.0
+                df['is_weekend'] = 0.0
+                df['is_peak_hour'] = 0.0
+                # Weather
+                for col in weather_cols:
+                    if col in df.columns:
+                        df[col] = 0.0
+
+            train_dataset_baseline = EnhancedSegmentDataset(
+                train_segments_baseline, segment_types, fit_scalers=True
+            )
+            val_dataset_baseline = EnhancedSegmentDataset(
+                val_segments_baseline, segment_types, fit_scalers=False,
+                target_scaler=train_dataset_baseline.target_scaler,
+                speed_scaler=train_dataset_baseline.speed_scaler,
+                operational_scaler=train_dataset_baseline.operational_scaler,
+                weather_scaler=train_dataset_baseline.weather_scaler
+            )
+            test_dataset_baseline = EnhancedSegmentDataset(
+                test_segments_baseline, segment_types, fit_scalers=False,
+                target_scaler=train_dataset_baseline.target_scaler,
+                speed_scaler=train_dataset_baseline.speed_scaler,
+                operational_scaler=train_dataset_baseline.operational_scaler,
+                weather_scaler=train_dataset_baseline.weather_scaler
+            )
+
+            train_loader_baseline = DataLoader(
+                train_dataset_baseline, batch_size=config.batch_size,
+                shuffle=True, num_workers=0, collate_fn=enhanced_collate_fn
+            )
+            val_loader_baseline = DataLoader(
+                val_dataset_baseline, batch_size=config.batch_size,
+                shuffle=False, num_workers=0, collate_fn=enhanced_collate_fn
+            )
+            test_loader_baseline = DataLoader(
+                test_dataset_baseline, batch_size=config.batch_size,
+                shuffle=False, num_workers=0, collate_fn=enhanced_collate_fn
+            )
+
+            baseline_results, baseline_model = train_magnn_lstm_residual(
+                train_loader_baseline, val_loader_baseline, test_loader_baseline,
+                adj_geo, adj_dist, adj_soc,
+                segment_types, train_dataset_baseline.target_scaler,
+                output_folder, DEVICE, config,
+                pretrained_magnn_path=magnn_checkpoint,
+                freeze_magnn=True
+            )
+            all_baseline_results.append(baseline_results)
+            print(f"   ✓ Baseline model trained")
+
+            # ================================================================
+            # COMPARISON TABLE
+            # ================================================================
+            print_section(f"📊 ITERATION {iteration} - ABLATION STUDY RESULTS")
+
+            for split in ['Train', 'Val', 'Test']:
+                print_ablation_comparison_table(
+                    full_results, no_op_results, no_weather_results, baseline_results, split
+                )
+
+            # Save JSON
+            ablation_json = {
+                'iteration': iteration,
+                'algorithm': ALGORITHM_NAME,
+                'model': 'MAGNN-LSTM-Residual',
+                'config': {
+                    'n_epochs': config.n_epochs,
+                    'batch_size': config.batch_size,
+                    'learning_rate': config.learning_rate,
+                    'sample_fraction': config.sample_fraction,
+                },
+                'full': {
+                    split: {k: float(v) if isinstance(v, (int, float, np.number)) else str(v)
+                            for k, v in full_results.get(split, {}).items()
+                            if k in ['r2', 'rmse', 'mae', 'mape', 'alpha', 'correction_mean', 'correction_std']}
+                    for split in ['Train', 'Val', 'Test']
+                },
+                'no_operational': {
+                    split: {k: float(v) if isinstance(v, (int, float, np.number)) else str(v)
+                            for k, v in no_op_results.get(split, {}).items()
+                            if k in ['r2', 'rmse', 'mae', 'mape', 'alpha', 'correction_mean', 'correction_std']}
+                    for split in ['Train', 'Val', 'Test']
+                },
+                'no_weather': {
+                    split: {k: float(v) if isinstance(v, (int, float, np.number)) else str(v)
+                            for k, v in no_weather_results.get(split, {}).items()
+                            if k in ['r2', 'rmse', 'mae', 'mape', 'alpha', 'correction_mean', 'correction_std']}
+                    for split in ['Train', 'Val', 'Test']
+                },
+                'baseline': {
+                    split: {k: float(v) if isinstance(v, (int, float, np.number)) else str(v)
+                            for k, v in baseline_results.get(split, {}).items()
+                            if k in ['r2', 'rmse', 'mae', 'mape', 'alpha', 'correction_mean', 'correction_std']}
+                    for split in ['Train', 'Val', 'Test']
+                },
+            }
+
+            json_path = os.path.join(output_folder, 'ablation_study.json')
+            with open(json_path, 'w') as f:
+                json.dump(ablation_json, f, indent=2)
+            print(f"✓ Ablation results saved → {json_path}\n")
+
+        except Exception as e:
+            print(f"\n❌ Error in iteration {iteration}: {e}")
+            import traceback
+            traceback.print_exc()
+            continue
+
+    # ====================================================================
+    # FINAL SUMMARY
+    # ====================================================================
+    if all_full_results and all_no_operational_results and all_no_weather_results and all_baseline_results:
+        print_section("🏆 ABLATION STUDY - FINAL SUMMARY")
+
+        for split in ['Train', 'Val', 'Test']:
+            print(f"\n{'=' * 130}")
+            print(f"{split.upper()} SET - AVERAGE OVER {len(all_full_results)} ITERATION(S)")
+            print(f"{'=' * 130}")
+            print(f"{'Metric':<10} {'Full':<20} {'No Operational':<20} {'No Weather':<20} {'Baseline':<20} {'Best':<15}")
+            print(f"{'-' * 130}")
+
+            metrics_info = [
+                ('R²', 'r2', True),
+                ('RMSE', 'rmse', False),
+                ('MAE', 'mae', False),
+                ('MAPE', 'mape', False),
+            ]
+
+            for display_name, metric_key, higher_is_better in metrics_info:
+                full_vals = [r.get(split, {}).get(metric_key, float('nan')) for r in all_full_results]
+                no_op_vals = [r.get(split, {}).get(metric_key, float('nan')) for r in all_no_operational_results]
+                no_weather_vals = [r.get(split, {}).get(metric_key, float('nan')) for r in all_no_weather_results]
+                baseline_vals = [r.get(split, {}).get(metric_key, float('nan')) for r in all_baseline_results]
+
+                full_avg = np.nanmean(full_vals)
+                no_op_avg = np.nanmean(no_op_vals)
+                no_weather_avg = np.nanmean(no_weather_vals)
+                baseline_avg = np.nanmean(baseline_vals)
+
+                full_std = np.nanstd(full_vals)
+                no_op_std = np.nanstd(no_op_vals)
+                no_weather_std = np.nanstd(no_weather_vals)
+                baseline_std = np.nanstd(baseline_vals)
+
+                if metric_key in ['rmse', 'mae']:
+                    full_str = f"{full_avg:.2f}±{full_std:.2f}s"
+                    no_op_str = f"{no_op_avg:.2f}±{no_op_std:.2f}s"
+                    no_weather_str = f"{no_weather_avg:.2f}±{no_weather_std:.2f}s"
+                    baseline_str = f"{baseline_avg:.2f}±{baseline_std:.2f}s"
+                elif metric_key == 'mape':
+                    full_str = f"{full_avg:.2f}±{full_std:.2f}%"
+                    no_op_str = f"{no_op_avg:.2f}±{no_op_std:.2f}%"
+                    no_weather_str = f"{no_weather_avg:.2f}±{no_weather_std:.2f}%"
+                    baseline_str = f"{baseline_avg:.2f}±{baseline_std:.2f}%"
+                else:
+                    full_str = f"{full_avg:.4f}±{full_std:.4f}"
+                    no_op_str = f"{no_op_avg:.4f}±{no_op_std:.4f}"
+                    no_weather_str = f"{no_weather_avg:.4f}±{no_weather_std:.4f}"
+                    baseline_str = f"{baseline_avg:.4f}±{baseline_std:.4f}"
+
+                if not any(np.isnan(v) for v in [full_avg, no_op_avg, no_weather_avg, baseline_avg]):
+                    if higher_is_better:
+                        best_val = max(full_avg, no_op_avg, no_weather_avg, baseline_avg)
+                        if best_val == full_avg:
+                            best_model = "Full ✓"
+                        elif best_val == no_op_avg:
+                            best_model = "No Op ✓"
+                        elif best_val == no_weather_avg:
+                            best_model = "No Weather ✓"
+                        else:
+                            best_model = "Baseline ✓"
+                    else:
+                        best_val = min(full_avg, no_op_avg, no_weather_avg, baseline_avg)
+                        if best_val == full_avg:
+                            best_model = "Full ✓"
+                        elif best_val == no_op_avg:
+                            best_model = "No Op ✓"
+                        elif best_val == no_weather_avg:
+                            best_model = "No Weather ✓"
+                        else:
+                            best_model = "Baseline ✓"
+                else:
+                    best_model = "N/A"
+
+                print(f"{display_name:<10} {full_str:<20} {no_op_str:<20} {no_weather_str:<20} {baseline_str:<20} {best_model:<15}")
+
+            print(f"{'=' * 130}\n")
+
+        # Feature importance analysis
+        print_section("🔍 FEATURE IMPORTANCE ANALYSIS")
+
+        for split in ['Test']:  # Focus on test set
+            print(f"\n{split.upper()} SET - Feature Contribution Analysis")
+            print(f"{'-' * 80}")
+
+            full_vals = [r.get(split, {}).get('r2', float('nan')) for r in all_full_results]
+            no_op_vals = [r.get(split, {}).get('r2', float('nan')) for r in all_no_operational_results]
+            no_weather_vals = [r.get(split, {}).get('r2', float('nan')) for r in all_no_weather_results]
+            baseline_vals = [r.get(split, {}).get('r2', float('nan')) for r in all_baseline_results]
+
+            full_r2 = np.nanmean(full_vals)
+            no_op_r2 = np.nanmean(no_op_vals)
+            no_weather_r2 = np.nanmean(no_weather_vals)
+            baseline_r2 = np.nanmean(baseline_vals)
+
+            operational_contribution = full_r2 - no_op_r2
+            weather_contribution = full_r2 - no_weather_r2
+            combined_contribution = full_r2 - baseline_r2
+
+            print(f"\nR² Score Comparison:")
+            print(f"  Full Model (All features):          {full_r2:.4f}")
+            print(f"  No Operational (Weather only):      {no_op_r2:.4f}")
+            print(f"  No Weather (Operational only):      {no_weather_r2:.4f}")
+            print(f"  Baseline (Spatial + Temporal only): {baseline_r2:.4f}")
+
+            print(f"\nFeature Contributions (ΔR²):")
+            print(f"  Operational features:    {operational_contribution:+.4f}")
+            print(f"  Weather features:        {weather_contribution:+.4f}")
+            print(f"  Combined (Op + Weather): {combined_contribution:+.4f}")
+
+            if operational_contribution > weather_contribution:
+                print(f"\n💡 Operational features contribute MORE to prediction accuracy")
+                print(f"   (Δ = {operational_contribution - weather_contribution:+.4f} R² improvement)")
+            elif weather_contribution > operational_contribution:
+                print(f"\n💡 Weather features contribute MORE to prediction accuracy")
+                print(f"   (Δ = {weather_contribution - operational_contribution:+.4f} R² improvement)")
+            else:
+                print(f"\n💡 Both feature groups contribute equally")
+
+            # Alpha analysis
+            full_alphas = [r.get(split, {}).get('alpha', float('nan')) for r in all_full_results]
+            no_op_alphas = [r.get(split, {}).get('alpha', float('nan')) for r in all_no_operational_results]
+            no_weather_alphas = [r.get(split, {}).get('alpha', float('nan')) for r in all_no_weather_results]
+            baseline_alphas = [r.get(split, {}).get('alpha', float('nan')) for r in all_baseline_results]
+
+            print(f"\nAdaptive Gating (α) Analysis:")
+            print(f"  Full:           α = {np.nanmean(full_alphas):.3f} ± {np.nanstd(full_alphas):.3f}")
+            print(f"  No Operational: α = {np.nanmean(no_op_alphas):.3f} ± {np.nanstd(no_op_alphas):.3f}")
+            print(f"  No Weather:     α = {np.nanmean(no_weather_alphas):.3f} ± {np.nanstd(no_weather_alphas):.3f}")
+            print(f"  Baseline:       α = {np.nanmean(baseline_alphas):.3f} ± {np.nanstd(baseline_alphas):.3f}")
+
+        print_section("✅ ABLATION STUDY COMPLETE")
+        print(f"  Total iterations: {len(all_full_results)}")
+        print(f"  Model: MAGNN-LSTM-Residual")
+        print(f"\n  Variants tested:")
+        print(f"    Full: All features (spatial + temporal + operational + weather)")
+        print(f"    No Operational: Weather only (spatial + temporal + weather)")
+        print(f"    No Weather: Operational only (spatial + temporal + operational)")
+        print(f"    Baseline: Spatial + temporal features only")
+        print(f"\n  Results saved in: outputs/{ALGORITHM_NAME}_*_ablation/")
+        print("=" * 80)
+
+
+def print_ablation_comparison_table(full_results, no_op_results, no_weather_results, baseline_results, split_name):
+    """Print formatted ablation study comparison table."""
+
+    full_m = full_results.get(split_name, {})
+    no_op_m = no_op_results.get(split_name, {})
+    no_weather_m = no_weather_results.get(split_name, {})
+    baseline_m = baseline_results.get(split_name, {})
+
+    print(f"\n{'=' * 130}")
+    print(f"{split_name.upper()} SET - ABLATION STUDY COMPARISON")
+    print(f"{'=' * 130}")
+    print(f"{'Metric':<10} {'Full':<20} {'No Operational':<20} {'No Weather':<20} {'Baseline':<20} {'Best':<15}")
+    print(f"{'-' * 130}")
+
+    metrics_info = [
+        ('R²', 'r2', True),
+        ('RMSE', 'rmse', False),
+        ('MAE', 'mae', False),
+        ('MAPE', 'mape', False),
+    ]
+
+    for display_name, metric_key, higher_is_better in metrics_info:
+        full_val = full_m.get(metric_key, float('nan'))
+        no_op_val = no_op_m.get(metric_key, float('nan'))
+        no_weather_val = no_weather_m.get(metric_key, float('nan'))
+        baseline_val = baseline_m.get(metric_key, float('nan'))
+
+        if metric_key in ['rmse', 'mae']:
+            full_str = f"{full_val:.2f}s"
+            no_op_str = f"{no_op_val:.2f}s"
+            no_weather_str = f"{no_weather_val:.2f}s"
+            baseline_str = f"{baseline_val:.2f}s"
+        elif metric_key == 'mape':
+            full_str = f"{full_val:.2f}%"
+            no_op_str = f"{no_op_val:.2f}%"
+            no_weather_str = f"{no_weather_val:.2f}%"
+            baseline_str = f"{baseline_val:.2f}%"
+        else:
+            full_str = f"{full_val:.4f}"
+            no_op_str = f"{no_op_val:.4f}"
+            no_weather_str = f"{no_weather_val:.4f}"
+            baseline_str = f"{baseline_val:.4f}"
+
+        if not any(np.isnan(v) for v in [full_val, no_op_val, no_weather_val, baseline_val]):
+            if higher_is_better:
+                best_val = max(full_val, no_op_val, no_weather_val, baseline_val)
+                if best_val == full_val:
+                    best_model = "Full ✓"
+                elif best_val == no_op_val:
+                    best_model = "No Op ✓"
+                elif best_val == no_weather_val:
+                    best_model = "No Weather ✓"
+                else:
+                    best_model = "Baseline ✓"
+            else:
+                best_val = min(full_val, no_op_val, no_weather_val, baseline_val)
+                if best_val == full_val:
+                    best_model = "Full ✓"
+                elif best_val == no_op_val:
+                    best_model = "No Op ✓"
+                elif best_val == no_weather_val:
+                    best_model = "No Weather ✓"
+                else:
+                    best_model = "Baseline ✓"
+        else:
+            best_model = "N/A"
+
+        print(f"{display_name:<10} {full_str:<20} {no_op_str:<20} {no_weather_str:<20} {baseline_str:<20} {best_model:<15}")
+
+    print(f"{'=' * 130}\n")
 
 
 # =============================================================================
@@ -775,12 +1455,15 @@ if __name__ == '__main__':
     import sys
 
     if len(sys.argv) > 1:
-        if sys.argv[1] == '--compare':
-            main_with_comparison()
+        if sys.argv[1] == '--compare-all':
+            main_with_three_way_comparison()
+        elif sys.argv[1] == '--ablation':
+            main_with_ablation_study()
         else:
             print(f"Unknown argument: {sys.argv[1]}")
             print("\nUsage:")
-            print("  python main.py            # Train MAGNN only")
-            print("  python main.py --compare  # Compare MAGNN vs Residual")
+            print("  python main.py                # Train MAGNN only")
+            print("  python main.py --compare-all  # Compare MAGNN vs Residual vs DualTaskMTL")
+            print("  python main.py --ablation     # Feature ablation study")
     else:
         main()

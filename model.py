@@ -1,13 +1,13 @@
 """
-model.py - UPDATED WITH BUG FIXES (NO MTL)
-===========================================
+model.py - COMPLETE WITH DUAL-TASK MTL
+=======================================
 ✅ Fixed weather scaling bug (was using raw values)
 ✅ Updated operational features: 4 features (arrivalDelay, departureDelay, is_weekend, is_peak_hour)
 ✅ Updated weather features: 8 features (all weather columns)
 ✅ All datasets updated to handle binary flags
-✅ MTL components removed for cleaner codebase
+✅ NEW: Dual-Task MTL (Local segments + Global stations)
 
-All neural network components for MAGNN and MAGNN-LSTM-Residual
+All neural network components including Multi-Task Learning
 """
 
 import numpy as np
@@ -26,12 +26,13 @@ from torch.utils.data import Dataset, DataLoader
 import torch.optim as optim
 
 from config import Config, DEVICE, print_section, haversine_meters
+from mtl import MTLHead, MTLLoss
 
 warnings.filterwarnings('ignore')
 
 
 # =============================================================================
-# BASE DATASET
+# BASE DATASET (NO CHANGES)
 # =============================================================================
 
 class SegmentDataset(Dataset):
@@ -113,7 +114,7 @@ class SegmentDataset(Dataset):
 
 
 # =============================================================================
-# ENHANCED DATASET
+# ENHANCED DATASET (✅ FIXED WEATHER SCALING + UPDATED FEATURES)
 # =============================================================================
 
 class EnhancedSegmentDataset(SegmentDataset):
@@ -239,7 +240,164 @@ class EnhancedSegmentDataset(SegmentDataset):
 
 
 # =============================================================================
-# MODELS
+# PATH DATASET (✅ UPDATED WITH BINARY FLAGS)
+# =============================================================================
+
+class PathDataset(Dataset):
+    """Dataset for multi-segment paths (seq_len > 1)."""
+
+    def __init__(self, paths_df, segment_types, max_path_length=10,
+                 fit_scalers: bool = True,
+                 target_scaler: RobustScaler = None,
+                 speed_scaler: RobustScaler = None,
+                 operational_scaler: RobustScaler = None,
+                 weather_scaler: RobustScaler = None,
+                 use_operational: bool = True,
+                 use_weather: bool = True):
+
+        self.paths_df = paths_df.copy()
+        self.segment_types = list(segment_types)
+        self.seg_to_idx = {seg: i for i, seg in enumerate(self.segment_types)}
+        self.max_path_length = max_path_length
+
+        self.use_operational = use_operational
+        self.use_weather = use_weather
+
+        if fit_scalers:
+            self.target_scaler = RobustScaler()
+            self.speed_scaler = RobustScaler()
+            self.operational_scaler = RobustScaler()
+            self.weather_scaler = RobustScaler()
+
+            self.target_scaler.fit(self.paths_df[['total_duration']])
+
+            all_speeds = []
+            all_operational = []
+            all_weather = []
+
+            for idx, row in self.paths_df.iterrows():
+                all_speeds.extend(row['speeds'])
+                for i in range(row['seq_len']):
+                    # ✅ UPDATED: 4 operational features
+                    all_operational.append([
+                        row['arrival_delays'][i],
+                        row['departure_delays'][i],
+                        row.get('is_weekend_flags', [0] * row['seq_len'])[i],
+                        row.get('is_peak_hour_flags', [0] * row['seq_len'])[i]
+                    ])
+                    # ✅ UPDATED: 8 weather features
+                    all_weather.append([
+                        row['temperatures'][i],
+                        row['apparent_temps'][i],
+                        row.get('precipitations', [0] * row['seq_len'])[i],
+                        row.get('rains', [0] * row['seq_len'])[i],
+                        row.get('snowfalls', [0] * row['seq_len'])[i],
+                        row['windspeeds'][i],
+                        row['windgusts'][i],
+                        row['wind_directions'][i]
+                    ])
+
+            if all_speeds:
+                self.speed_scaler.fit(np.array(all_speeds).reshape(-1, 1))
+            if all_operational:
+                self.operational_scaler.fit(np.array(all_operational))
+            if all_weather:
+                self.weather_scaler.fit(np.array(all_weather))
+        else:
+            self.target_scaler = target_scaler
+            self.speed_scaler = speed_scaler
+            self.operational_scaler = operational_scaler
+            self.weather_scaler = weather_scaler
+
+    def __len__(self):
+        return len(self.paths_df)
+
+    def __getitem__(self, idx):
+        row = self.paths_df.iloc[idx]
+        seq_len = int(row['seq_len'])
+
+        seg_indices = []
+        for seg_id in row['segment_ids']:
+            seg_idx = self.seg_to_idx.get(seg_id, 0)
+            seg_indices.append(seg_idx)
+
+        temporal_features = []
+        for i in range(seq_len):
+            hour = row['hours'][i]
+            dow = row['days_of_week'][i]
+            speed = row['speeds'][i]
+
+            hour_sin = np.sin(2 * np.pi * hour / 24)
+            hour_cos = np.cos(2 * np.pi * hour / 24)
+            dow_sin = np.sin(2 * np.pi * dow / 7)
+            dow_cos = np.cos(2 * np.pi * dow / 7)
+
+            speed_scaled = self.speed_scaler.transform([[speed]])[0, 0]
+
+            temporal_features.append([
+                hour_sin, hour_cos, dow_sin, dow_cos, speed_scaled
+            ])
+
+        # ✅ UPDATED: 4 operational features with binary flags
+        operational_features = []
+        for i in range(seq_len):
+            if self.use_operational:
+                operational_features.append([
+                    row['arrival_delays'][i],
+                    row['departure_delays'][i],
+                    row.get('is_weekend_flags', [0] * seq_len)[i],
+                    row.get('is_peak_hour_flags', [0] * seq_len)[i]
+                ])
+            else:
+                operational_features.append([0.0, 0.0, 0.0, 0.0])
+
+        if self.use_operational:
+            operational_scaled = self.operational_scaler.transform(operational_features)
+        else:
+            operational_scaled = np.array(operational_features)
+
+        # ✅ UPDATED: 8 weather features
+        weather_features = []
+        for i in range(seq_len):
+            if self.use_weather:
+                weather_features.append([
+                    row['temperatures'][i],
+                    row['apparent_temps'][i],
+                    row.get('precipitations', [0] * seq_len)[i],
+                    row.get('rains', [0] * seq_len)[i],
+                    row.get('snowfalls', [0] * seq_len)[i],
+                    row['windspeeds'][i],
+                    row['windgusts'][i],
+                    row['wind_directions'][i]
+                ])
+            else:
+                weather_features.append([0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0])
+
+        if self.use_weather:
+            weather_scaled = self.weather_scaler.transform(weather_features)
+        else:
+            weather_scaled = np.array(weather_features)
+
+        target_scaled = self.target_scaler.transform([[row['total_duration']]])[0, 0]
+
+        # Padding
+        while len(seg_indices) < self.max_path_length:
+            seg_indices.append(0)
+            temporal_features.append([0, 0, 0, 0, 0])
+            operational_scaled = np.vstack([operational_scaled, [0, 0, 0, 0]])
+            weather_scaled = np.vstack([weather_scaled, [0, 0, 0, 0, 0, 0, 0, 0]])
+
+        seg_indices = torch.LongTensor(seg_indices[:self.max_path_length])
+        temporal = torch.FloatTensor(temporal_features[:self.max_path_length])
+        operational = torch.FloatTensor(operational_scaled[:self.max_path_length])
+        weather = torch.FloatTensor(weather_scaled[:self.max_path_length])
+        target = torch.FloatTensor([target_scaled])
+
+        return seg_indices, temporal, operational, weather, target, seq_len
+
+
+# =============================================================================
+# MODELS (CORE ARCHITECTURE)
 # =============================================================================
 
 class GraphAttentionLayer(nn.Module):
@@ -352,6 +510,383 @@ class MAGTTE(nn.Module):
         return self.regression_head(lstm_out)
 
 
+class GlobalTemporalAttention(nn.Module):
+    def __init__(self, feature_dim, dropout=0.1):
+        super().__init__()
+        self.feature_dim = feature_dim
+        self.W_Q = nn.Linear(feature_dim, feature_dim, bias=False)
+        self.W_K = nn.Linear(feature_dim, feature_dim, bias=False)
+        self.W_V = nn.Linear(feature_dim, feature_dim, bias=False)
+        self.dropout = nn.Dropout(dropout)
+        self.layer_norm = nn.LayerNorm(feature_dim)
+        self.scale = np.sqrt(feature_dim)
+
+    def forward(self, x):
+        Q = self.W_Q(x)
+        K = self.W_K(x)
+        V = self.W_V(x)
+        scores = torch.matmul(Q, K.transpose(-2, -1)) / self.scale
+        attn_weights = F.softmax(scores, dim=-1)
+        attn_weights = self.dropout(attn_weights)
+        out = torch.matmul(attn_weights, V)
+        out = self.layer_norm(out + x)
+        return out, attn_weights
+
+
+class LSTMWithGlobalTemporalAttention(nn.Module):
+    def __init__(self, spatial_dim, operational_dim, weather_dim,
+                 temporal_dim=5, hidden_dim=128, n_layers=1, dropout=0.1, out_dim=1):
+        super().__init__()
+        lstm_input_dim = spatial_dim + operational_dim + weather_dim + temporal_dim
+        self.lstm = nn.LSTM(
+            input_size=lstm_input_dim,
+            hidden_size=hidden_dim,
+            num_layers=n_layers,
+            batch_first=True,
+            dropout=0.0
+        )
+        self.global_attention = GlobalTemporalAttention(feature_dim=hidden_dim, dropout=dropout)
+        self.fusion = nn.Sequential(
+            nn.Linear(hidden_dim, 32),
+            nn.ReLU(),
+            nn.Dropout(dropout),
+            nn.Linear(32, out_dim)
+        )
+        for layer in self.fusion:
+            if isinstance(layer, nn.Linear):
+                nn.init.normal_(layer.weight, 0, 0.01)
+                nn.init.zeros_(layer.bias)
+
+    def forward(self, seq_x):
+        batch_size = seq_x.size(0)
+        seq_x = seq_x.reshape(batch_size, 1, -1)
+        lstm_out, _ = self.lstm(seq_x)
+        attn_out, _ = self.global_attention(lstm_out)
+        attn_last = attn_out[:, -1, :]
+        out = self.fusion(attn_last)
+        return out
+
+
+class MAGNN_LSTM(nn.Module):
+    """✅ UPDATED: Now expects 4 operational features and 8 weather features"""
+
+    def __init__(self, magnn_model, spatial_dim, operational_dim, weather_dim,
+                 temporal_dim=5, lstm_hidden=32, lstm_layers=1, dropout=0.4, freeze_magnn=True):
+        super().__init__()
+        self.magnn = magnn_model
+        self.freeze_magnn = freeze_magnn
+        if freeze_magnn:
+            for param in self.magnn.parameters():
+                param.requires_grad = False
+        self.lstm_model = LSTMWithGlobalTemporalAttention(
+            spatial_dim=spatial_dim,
+            operational_dim=operational_dim,  # Should be 4
+            weather_dim=weather_dim,  # Should be 8
+            temporal_dim=temporal_dim,
+            hidden_dim=lstm_hidden,
+            n_layers=lstm_layers,
+            dropout=dropout,
+            out_dim=1
+        )
+
+    def get_magnn_embeddings(self, seg_indices):
+        all_nodes = self.magnn.node_embedding.weight.unsqueeze(0)
+        spatial_all = self.magnn.multi_gat(
+            all_nodes,
+            [self.magnn.adj_geo, self.magnn.adj_dist, self.magnn.adj_soc]
+        )
+        spatial_all = spatial_all.squeeze(0)
+        spatial_embeddings = spatial_all[seg_indices]
+        return spatial_embeddings
+
+    def forward(self, seg_indices, temporal_features, operational_features, weather_features):
+        with torch.no_grad():
+            magnn_baseline = self.magnn(seg_indices, temporal_features)
+        if self.freeze_magnn:
+            with torch.no_grad():
+                spatial_embeddings = self.get_magnn_embeddings(seg_indices)
+        else:
+            spatial_embeddings = self.get_magnn_embeddings(seg_indices)
+        combined_features = torch.cat([
+            spatial_embeddings,
+            operational_features,
+            weather_features,
+            temporal_features
+        ], dim=1)
+        seq_features = combined_features.unsqueeze(1)
+        lstm_correction = self.lstm_model(seq_features)
+        final_prediction = magnn_baseline + 0.5 * lstm_correction
+        return final_prediction
+
+
+class MAGNN_LSTM_MTL(nn.Module):
+    """✅ UPDATED: Multi-Task Learning with updated feature dimensions"""
+
+    def __init__(self, magnn_model, spatial_dim, operational_dim, weather_dim,
+                 temporal_dim=5, lstm_hidden=64, lstm_layers=1, dropout=0.2,
+                 mtl_segment_hidden=64, mtl_path_hidden=128,
+                 freeze_magnn=True):
+        super().__init__()
+
+        self.magnn = magnn_model
+        self.freeze_magnn = freeze_magnn
+        self.lstm_input_dim = spatial_dim + operational_dim + weather_dim + temporal_dim
+
+        if freeze_magnn:
+            for param in self.magnn.parameters():
+                param.requires_grad = False
+
+        self.lstm = nn.LSTM(
+            input_size=self.lstm_input_dim,
+            hidden_size=lstm_hidden,
+            num_layers=lstm_layers,
+            batch_first=True,
+            dropout=0.0
+        )
+
+        self.global_attention = GlobalTemporalAttention(
+            feature_dim=lstm_hidden,
+            dropout=dropout
+        )
+
+        self.mtl_head = MTLHead(
+            feature_dim=lstm_hidden,
+            segment_hidden=mtl_segment_hidden,
+            path_hidden=mtl_path_hidden,
+            dropout=dropout
+        )
+
+    def get_magnn_embeddings(self, seg_indices):
+        all_nodes = self.magnn.node_embedding.weight.unsqueeze(0)
+        spatial_all = self.magnn.multi_gat(
+            all_nodes,
+            [self.magnn.adj_geo, self.magnn.adj_dist, self.magnn.adj_soc]
+        )
+        spatial_all = spatial_all.squeeze(0)
+        spatial_embeddings = spatial_all[seg_indices]
+        return spatial_embeddings
+
+    def forward(self, seg_indices, temporal_features, operational_features, weather_features,
+                mask=None, return_components=False):
+        batch_size, seq_len, _ = temporal_features.size()
+
+        if self.freeze_magnn:
+            with torch.no_grad():
+                spatial_embeddings = self.get_magnn_embeddings(seg_indices)
+        else:
+            spatial_embeddings = self.get_magnn_embeddings(seg_indices)
+
+        combined_sequence = []
+        for t in range(seq_len):
+            combined = torch.cat([
+                spatial_embeddings[:, t, :],
+                operational_features[:, t, :],
+                weather_features[:, t, :],
+                temporal_features[:, t, :]
+            ], dim=1)
+            combined_sequence.append(combined)
+
+        combined_sequence = torch.stack(combined_sequence, dim=1)
+        lstm_out, _ = self.lstm(combined_sequence)
+        attn_out, attn_weights = self.global_attention(lstm_out)
+
+        if return_components:
+            individual_preds, collective_pred, attention = self.mtl_head(
+                attn_out, mask=mask, return_components=True
+            )
+            return individual_preds, collective_pred, attention
+        else:
+            collective_pred = self.mtl_head(attn_out, mask=mask, return_components=False)
+            return collective_pred
+
+
+# =============================================================================
+# NEW: DUAL-TASK MTL MODEL
+# =============================================================================
+
+class DualTaskMTLHead(nn.Module):
+    """
+    Dual-Task MTL: Local segments + Global station-to-station
+    """
+
+    def __init__(self, feature_dim, local_hidden=64, global_hidden=128, dropout=0.2):
+        super().__init__()
+
+        # Local task: Individual segment prediction
+        self.local_head = nn.Sequential(
+            nn.Linear(feature_dim, local_hidden),
+            nn.ReLU(),
+            nn.Dropout(dropout),
+            nn.Linear(local_hidden, 32),
+            nn.ReLU(),
+            nn.Dropout(dropout),
+            nn.Linear(32, 1)
+        )
+
+        # Global task: Station-to-station aggregate
+        self.global_attention = nn.MultiheadAttention(
+            embed_dim=feature_dim,
+            num_heads=4,
+            dropout=dropout,
+            batch_first=True
+        )
+
+        self.global_head = nn.Sequential(
+            nn.Linear(feature_dim, global_hidden),
+            nn.ReLU(),
+            nn.Dropout(dropout),
+            nn.Linear(global_hidden, 64),
+            nn.ReLU(),
+            nn.Dropout(dropout),
+            nn.Linear(64, 1)
+        )
+
+        # Task weighting (learnable)
+        self.log_var_local = nn.Parameter(torch.zeros(1))
+        self.log_var_global = nn.Parameter(torch.zeros(1))
+
+    def forward(self, x, mask=None):
+        """
+        Args:
+            x: [batch, seq_len, feature_dim] - sequence of segment embeddings
+            mask: [batch, seq_len] - padding mask
+        Returns:
+            local_preds: [batch, seq_len, 1] - per-segment predictions
+            global_pred: [batch, 1] - aggregated prediction
+        """
+        # Local task: Predict each segment independently
+        local_preds = self.local_head(x)  # [batch, seq_len, 1]
+
+        # Global task: Attend over sequence and predict aggregate
+        attn_out, _ = self.global_attention(x, x, x, key_padding_mask=~mask if mask is not None else None)
+
+        # Global pooling (mean over valid segments)
+        if mask is not None:
+            mask_expanded = mask.unsqueeze(-1).float()
+            global_repr = (attn_out * mask_expanded).sum(dim=1) / mask_expanded.sum(dim=1).clamp(min=1)
+        else:
+            global_repr = attn_out.mean(dim=1)
+
+        global_pred = self.global_head(global_repr)  # [batch, 1]
+
+        return local_preds, global_pred
+
+
+class MAGNN_LSTM_DualTaskMTL(nn.Module):
+    """
+    ✅ IMPROVED MTL: Local segments + Global stations
+
+    Dual-task learning:
+    - Local: Predict individual segment durations
+    - Global: Predict total journey time
+    """
+
+    def __init__(self, magnn_model, spatial_dim, operational_dim, weather_dim,
+                 temporal_dim=5, lstm_hidden=64, lstm_layers=1, dropout=0.2,
+                 local_hidden=64, global_hidden=128, freeze_magnn=True):
+        super().__init__()
+
+        self.magnn = magnn_model
+        self.freeze_magnn = freeze_magnn
+        self.lstm_input_dim = spatial_dim + operational_dim + weather_dim + temporal_dim
+
+        if freeze_magnn:
+            for param in self.magnn.parameters():
+                param.requires_grad = False
+
+        # LSTM for temporal modeling
+        self.lstm = nn.LSTM(
+            input_size=self.lstm_input_dim,
+            hidden_size=lstm_hidden,
+            num_layers=lstm_layers,
+            batch_first=True,
+            dropout=0.0
+        )
+
+        # Global temporal attention
+        self.global_attention = nn.MultiheadAttention(
+            embed_dim=lstm_hidden,
+            num_heads=4,
+            dropout=dropout,
+            batch_first=True
+        )
+
+        # Dual-task MTL head
+        self.mtl_head = DualTaskMTLHead(
+            feature_dim=lstm_hidden,
+            local_hidden=local_hidden,
+            global_hidden=global_hidden,
+            dropout=dropout
+        )
+
+    def get_magnn_embeddings(self, seg_indices):
+        all_nodes = self.magnn.node_embedding.weight.unsqueeze(0)
+        spatial_all = self.magnn.multi_gat(
+            all_nodes,
+            [self.magnn.adj_geo, self.magnn.adj_dist, self.magnn.adj_soc]
+        )
+        spatial_all = spatial_all.squeeze(0)
+        spatial_embeddings = spatial_all[seg_indices]
+        return spatial_embeddings
+
+    def forward(self, seg_indices, temporal_features, operational_features,
+                weather_features, mask=None, return_local=False):
+        """
+        Returns:
+            local_preds: [batch, seq_len, 1] if return_local=True
+            global_pred: [batch, 1] always returned
+        """
+        batch_size = temporal_features.size(0)
+
+        # Handle both 2D and 3D inputs
+        if len(temporal_features.shape) == 2:
+            # Single segment: [batch, features] -> [batch, 1, features]
+            temporal_features = temporal_features.unsqueeze(1)
+            operational_features = operational_features.unsqueeze(1)
+            weather_features = weather_features.unsqueeze(1)
+            seg_indices = seg_indices.unsqueeze(1) if len(seg_indices.shape) == 1 else seg_indices
+            if mask is not None:
+                mask = mask.unsqueeze(1) if len(mask.shape) == 1 else mask
+
+        seq_len = temporal_features.size(1)
+
+        # Get spatial embeddings
+        if self.freeze_magnn:
+            with torch.no_grad():
+                spatial_embeddings = self.get_magnn_embeddings(seg_indices)
+        else:
+            spatial_embeddings = self.get_magnn_embeddings(seg_indices)
+
+        # Combine all features
+        combined_sequence = []
+        for t in range(seq_len):
+            combined = torch.cat([
+                spatial_embeddings[:, t, :] if spatial_embeddings.dim() > 2 else spatial_embeddings,
+                operational_features[:, t, :],
+                weather_features[:, t, :],
+                temporal_features[:, t, :]
+            ], dim=1)
+            combined_sequence.append(combined)
+
+        combined_sequence = torch.stack(combined_sequence, dim=1)
+
+        # LSTM encoding
+        lstm_out, _ = self.lstm(combined_sequence)
+
+        # Global attention
+        attn_out, _ = self.global_attention(
+            lstm_out, lstm_out, lstm_out,
+            key_padding_mask=~mask if mask is not None else None
+        )
+
+        # Dual-task predictions
+        local_preds, global_pred = self.mtl_head(attn_out, mask)
+
+        if return_local:
+            return local_preds, global_pred
+        return global_pred
+
+
 class SimpleMLP(nn.Module):
     def __init__(self, num_segments, embed_dim=32, dropout=0.3):
         super().__init__()
@@ -424,6 +959,20 @@ def enhanced_collate_fn(batch):
 
     mask = torch.arange(max_len).unsqueeze(0) < lengths.unsqueeze(1)
     return seg_indices, temporal_pad, operational_pad, weather_pad, targets, lengths, mask
+
+
+def path_collate_fn(batch):
+    seg_indices = torch.stack([item[0] for item in batch])
+    temporal = torch.stack([item[1] for item in batch])
+    operational = torch.stack([item[2] for item in batch])
+    weather = torch.stack([item[3] for item in batch])
+    targets = torch.stack([item[4] for item in batch])
+    lengths = torch.LongTensor([item[5] for item in batch])
+
+    max_len = seg_indices.size(1)
+    mask = torch.arange(max_len).unsqueeze(0) < lengths.unsqueeze(1)
+
+    return seg_indices, temporal, operational, weather, targets, lengths, mask
 
 
 # =============================================================================
@@ -581,6 +1130,603 @@ def train_magtte(train_loader, val_loader, test_loader,
             err = p - a
             pct = (err / a * 100) if a > 0 else 0.0
             print(f"  {i:>3}  {a:>10.2f}  {p:>10.2f}  {err:>9.2f}  {pct:>6.2f}%")
+
+    return results, model
+
+
+def train_magnn_lstm(train_loader, val_loader, test_loader,
+                     adj_geo, adj_dist, adj_soc,
+                     segment_types, scaler,
+                     output_folder, device, cfg,
+                     pretrained_magnn_path=None,
+                     freeze_magnn=True):
+    print_section("MAGNN-LSTM TRAINING")
+    num_segments = len(segment_types)
+
+    magnn_base = MAGTTE(num_segments, cfg.n_heads, cfg.node_embed_dim, cfg.gat_hidden,
+                        cfg.lstm_hidden, cfg.historical_dim, cfg.dropout).to(device)
+    magnn_base.set_adjacency_matrices(adj_geo, adj_dist, adj_soc)
+
+    if pretrained_magnn_path and os.path.exists(pretrained_magnn_path):
+        magnn_base.load_state_dict(torch.load(pretrained_magnn_path, map_location=device))
+        print(f"   ✓ Loaded pre-trained MAGNN")
+
+    model = MAGNN_LSTM(magnn_base, cfg.gat_hidden, 4, 8, 5, 32, 1, 0.1, True).to(device)
+
+    n_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
+    print(f"   Trainable params: {n_params:,}")
+
+    optimizer = optim.Adam(filter(lambda p: p.requires_grad, model.parameters()),
+                           lr=cfg.learning_rate * 0.1, weight_decay=cfg.weight_decay * 5)
+    scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='min', factor=0.5, patience=5)
+    criterion = nn.SmoothL1Loss()
+    best_val_loss = float('inf')
+    patience_counter = 0
+    best_ckpt = os.path.join(output_folder, 'magnn_lstm_best.pth')
+
+    print()
+    for epoch in range(1, cfg.n_epochs + 1):
+        model.train()
+        train_loss = 0.0
+        n_batches = 0
+        for batch in train_loader:
+            seg_idx, temporal, operational, weather, target, lengths, mask = batch
+            seg_idx = seg_idx.to(device)
+            temporal = temporal.squeeze(1).to(device)
+            operational = operational.squeeze(1).to(device)
+            weather = weather.squeeze(1).to(device)
+            target = target.to(device)
+            predictions = model(seg_idx, temporal, operational, weather)
+            loss = criterion(predictions, target)
+            if torch.isnan(loss) or torch.isinf(loss):
+                continue
+            optimizer.zero_grad()
+            loss.backward()
+            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+            optimizer.step()
+            train_loss += loss.item()
+            n_batches += 1
+        train_loss /= max(n_batches, 1)
+
+        model.eval()
+        val_loss = 0.0
+        val_preds, val_targets = [], []
+        n_val = 0
+        with torch.no_grad():
+            for batch in val_loader:
+                seg_idx, temporal, operational, weather, target, lengths, mask = batch
+                seg_idx = seg_idx.to(device)
+                temporal = temporal.squeeze(1).to(device)
+                operational = operational.squeeze(1).to(device)
+                weather = weather.squeeze(1).to(device)
+                target = target.to(device)
+                predictions = model(seg_idx, temporal, operational, weather)
+                loss = criterion(predictions, target)
+                if not torch.isnan(loss) and not torch.isinf(loss):
+                    val_loss += loss.item()
+                    n_val += 1
+                    val_preds.append(predictions.cpu().numpy())
+                    val_targets.append(target.cpu().numpy())
+        val_loss /= max(n_val, 1)
+        scheduler.step(val_loss)
+
+        if val_preds:
+            vp = scaler.inverse_transform(np.concatenate(val_preds))
+            vt = scaler.inverse_transform(np.concatenate(val_targets))
+            val_r2 = r2_score(vt, vp)
+        else:
+            val_r2 = float('nan')
+
+        if epoch % max(1, cfg.n_epochs // 5) == 0 or epoch == 1:
+            print(f"  Epoch {epoch:>3}/{cfg.n_epochs}  train_loss={train_loss:.4f}  "
+                  f"val_loss={val_loss:.4f}  val_R²={val_r2:.4f}")
+
+        if not np.isnan(val_loss) and val_loss < best_val_loss:
+            best_val_loss = val_loss
+            patience_counter = 0
+            torch.save(model.state_dict(), best_ckpt)
+        else:
+            patience_counter += 1
+            if patience_counter >= cfg.early_stopping_patience:
+                print(f"\n  ⏹️  Early stopping at epoch {epoch}")
+                break
+
+    if os.path.exists(best_ckpt):
+        model.load_state_dict(torch.load(best_ckpt, map_location=device))
+
+    print_section("MAGNN-LSTM — FINAL RESULTS")
+
+    def _eval(loader, name):
+        model.eval()
+        preds, targets = [], []
+        with torch.no_grad():
+            for batch in loader:
+                seg_idx, temporal, operational, weather, target, lengths, mask = batch
+                seg_idx = seg_idx.to(device)
+                temporal = temporal.squeeze(1).to(device)
+                operational = operational.squeeze(1).to(device)
+                weather = weather.squeeze(1).to(device)
+                pred = model(seg_idx, temporal, operational, weather)
+                preds.append(pred.cpu().numpy())
+                targets.append(target.cpu().numpy())
+        if not preds:
+            return {}
+        p = scaler.inverse_transform(np.concatenate(preds))
+        t = scaler.inverse_transform(np.concatenate(targets))
+        r2 = r2_score(t, p)
+        rmse = np.sqrt(mean_squared_error(t, p))
+        mae = mean_absolute_error(t, p)
+        mask = t.flatten() > 0
+        mape = np.mean(np.abs((t.flatten()[mask] - p.flatten()[mask]) /
+                              t.flatten()[mask])) * 100 if mask.any() else float('nan')
+        print(f"   {name:<6}  R²={r2:.4f}  RMSE={rmse:.2f}s  MAE={mae:.2f}s  MAPE={mape:.2f}%")
+        return {'r2': r2, 'rmse': rmse, 'mae': mae, 'mape': mape,
+                'preds': p.flatten().tolist(), 'actual': t.flatten().tolist()}
+
+    results = {'Train': _eval(train_loader, 'Train'), 'Val': _eval(val_loader, 'Val'),
+               'Test': _eval(test_loader, 'Test')}
+
+    test_res = results.get('Test', {})
+    if test_res.get('preds'):
+        print(f"\n{'Idx':>4}  {'Actual(s)':>10}  {'Pred(s)':>10}  {'Error(s)':>9}  {'Error%':>7}")
+        print("  " + "-" * 48)
+        for i in range(min(20, len(test_res['actual']))):
+            a, p = test_res['actual'][i], test_res['preds'][i]
+            err = p - a
+            epct = (err / a * 100) if a > 0 else 0.0
+            print(f"  {i:>3}  {a:>10.2f}  {p:>10.2f}  {err:>9.2f}  {epct:>6.2f}%")
+
+    return results, model
+
+
+def train_magnn_lstm_mtl(train_loader, val_loader, test_loader,
+                         adj_geo, adj_dist, adj_soc,
+                         segment_types, scaler,
+                         output_folder, device, cfg,
+                         pretrained_magnn_path=None,
+                         freeze_magnn=True):
+    """Train MAGNN-LSTM-MTL with REAL multi-segment paths."""
+    print_section("MAGNN-LSTM-MTL TRAINING (Multi-Segment Paths)")
+    num_segments = len(segment_types)
+
+    magnn_base = MAGTTE(num_segments, cfg.n_heads, cfg.node_embed_dim, cfg.gat_hidden,
+                        cfg.lstm_hidden, cfg.historical_dim, cfg.dropout).to(device)
+    magnn_base.set_adjacency_matrices(adj_geo, adj_dist, adj_soc)
+
+    if pretrained_magnn_path and os.path.exists(pretrained_magnn_path):
+        magnn_base.load_state_dict(torch.load(pretrained_magnn_path, map_location=device))
+        print(f"   ✓ Loaded pre-trained MAGNN from {pretrained_magnn_path}")
+
+    model = MAGNN_LSTM_MTL(
+        magnn_base,
+        cfg.gat_hidden,
+        4,  # operational_dim
+        8,  # weather_dim
+        5,  # temporal_dim
+        64,  # lstm_hidden
+        1,  # lstm_layers
+        0.2,  # dropout
+        64,  # mtl_segment_hidden
+        128,  # mtl_path_hidden
+        freeze_magnn
+    ).to(device)
+
+    n_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
+    print(f"   Trainable params: {n_params:,}")
+    print(f"   MTL lambda: {cfg.mtl_lambda} (individual vs collective balance)")
+
+    optimizer = optim.Adam(
+        filter(lambda p: p.requires_grad, model.parameters()),
+        lr=cfg.learning_rate * 0.1,
+        weight_decay=cfg.weight_decay * 5
+    )
+    scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='min', factor=0.5, patience=5)
+
+    mtl_criterion = MTLLoss(lambda_weight=cfg.mtl_lambda, criterion=nn.SmoothL1Loss())
+
+    best_val_loss = float('inf')
+    patience_counter = 0
+    best_ckpt = os.path.join(output_folder, 'magnn_lstm_mtl_best.pth')
+
+    print()
+    for epoch in range(1, cfg.n_epochs + 1):
+        model.train()
+        train_loss = 0.0
+        train_ind_loss = 0.0
+        train_col_loss = 0.0
+        n_batches = 0
+
+        for batch in train_loader:
+            seg_idx, temporal, operational, weather, target, lengths, mask = batch
+            seg_idx = seg_idx.to(device)
+            temporal = temporal.to(device)
+            operational = operational.to(device)
+            weather = weather.to(device)
+            target = target.to(device)
+            mask = mask.to(device)
+
+            individual_preds, collective_pred, attention = model(
+                seg_idx, temporal, operational, weather, mask, return_components=True
+            )
+
+            loss, loss_dict = mtl_criterion(individual_preds, collective_pred, target, mask)
+
+            if torch.isnan(loss) or torch.isinf(loss):
+                continue
+
+            optimizer.zero_grad()
+            loss.backward()
+            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+            optimizer.step()
+
+            train_loss += loss_dict['total']
+            train_ind_loss += loss_dict['individual']
+            train_col_loss += loss_dict['collective']
+            n_batches += 1
+
+        train_loss /= max(n_batches, 1)
+        train_ind_loss /= max(n_batches, 1)
+        train_col_loss /= max(n_batches, 1)
+
+        model.eval()
+        val_loss = 0.0
+        val_preds, val_targets = [], []
+        n_val = 0
+
+        with torch.no_grad():
+            for batch in val_loader:
+                seg_idx, temporal, operational, weather, target, lengths, mask = batch
+                seg_idx = seg_idx.to(device)
+                temporal = temporal.to(device)
+                operational = operational.to(device)
+                weather = weather.to(device)
+                target = target.to(device)
+                mask = mask.to(device)
+
+                individual_preds, collective_pred, attention = model(
+                    seg_idx, temporal, operational, weather, mask, return_components=True
+                )
+
+                loss, loss_dict = mtl_criterion(individual_preds, collective_pred, target, mask)
+
+                if not torch.isnan(loss) and not torch.isinf(loss):
+                    val_loss += loss_dict['total']
+                    n_val += 1
+                    val_preds.append(collective_pred.cpu().numpy())
+                    val_targets.append(target.cpu().numpy())
+
+        val_loss /= max(n_val, 1)
+        scheduler.step(val_loss)
+
+        if val_preds:
+            vp = scaler.inverse_transform(np.concatenate(val_preds))
+            vt = scaler.inverse_transform(np.concatenate(val_targets))
+            val_r2 = r2_score(vt, vp)
+        else:
+            val_r2 = float('nan')
+
+        if epoch % max(1, cfg.n_epochs // 5) == 0 or epoch == 1:
+            print(f"  Epoch {epoch:>3}/{cfg.n_epochs}  "
+                  f"train_loss={train_loss:.4f} (ind:{train_ind_loss:.4f} col:{train_col_loss:.4f})  "
+                  f"val_loss={val_loss:.4f}  val_R²={val_r2:.4f}")
+
+        if not np.isnan(val_loss) and val_loss < best_val_loss:
+            best_val_loss = val_loss
+            patience_counter = 0
+            torch.save(model.state_dict(), best_ckpt)
+        else:
+            patience_counter += 1
+            if patience_counter >= cfg.early_stopping_patience:
+                print(f"\n  ⏹️  Early stopping at epoch {epoch}")
+                break
+
+    if os.path.exists(best_ckpt):
+        model.load_state_dict(torch.load(best_ckpt, map_location=device))
+
+    print_section("MAGNN-LSTM-MTL — FINAL RESULTS")
+
+    def _eval(loader, name):
+        model.eval()
+        preds, targets = [], []
+        with torch.no_grad():
+            for batch in loader:
+                seg_idx, temporal, operational, weather, target, lengths, mask = batch
+                seg_idx = seg_idx.to(device)
+                temporal = temporal.to(device)
+                operational = operational.to(device)
+                weather = weather.to(device)
+                mask = mask.to(device)
+
+                pred = model(seg_idx, temporal, operational, weather, mask, return_components=False)
+                preds.append(pred.cpu().numpy())
+                targets.append(target.cpu().numpy())
+
+        if not preds:
+            return {}
+
+        p = scaler.inverse_transform(np.concatenate(preds))
+        t = scaler.inverse_transform(np.concatenate(targets))
+        r2 = r2_score(t, p)
+        rmse = np.sqrt(mean_squared_error(t, p))
+        mae = mean_absolute_error(t, p)
+        mask_valid = t.flatten() > 0
+        mape = np.mean(np.abs((t.flatten()[mask_valid] - p.flatten()[mask_valid]) /
+                              t.flatten()[mask_valid])) * 100 if mask_valid.any() else float('nan')
+
+        print(f"   {name:<6}  R²={r2:.4f}  RMSE={rmse:.2f}s  MAE={mae:.2f}s  MAPE={mape:.2f}%")
+        return {'r2': r2, 'rmse': rmse, 'mae': mae, 'mape': mape,
+                'preds': p.flatten().tolist(), 'actual': t.flatten().tolist()}
+
+    results = {'Train': _eval(train_loader, 'Train'),
+               'Val': _eval(val_loader, 'Val'),
+               'Test': _eval(test_loader, 'Test')}
+
+    test_res = results.get('Test', {})
+    if test_res.get('preds'):
+        print(f"\n{'Idx':>4}  {'Actual(s)':>10}  {'Pred(s)':>10}  {'Error(s)':>9}  {'Error%':>7}")
+        print("  " + "-" * 48)
+        for i in range(min(20, len(test_res['actual']))):
+            a, p = test_res['actual'][i], test_res['preds'][i]
+            err = p - a
+            epct = (err / a * 100) if a > 0 else 0.0
+            print(f"  {i:>3}  {a:>10.2f}  {p:>10.2f}  {err:>9.2f}  {epct:>6.2f}%")
+
+    return results, model
+
+
+# =============================================================================
+# NEW: DUAL-TASK MTL TRAINING FUNCTION
+# =============================================================================
+
+def train_magnn_lstm_dualtask_mtl(train_loader, val_loader, test_loader,
+                                   adj_geo, adj_dist, adj_soc,
+                                   segment_types, scaler,
+                                   output_folder, device, cfg,
+                                   pretrained_magnn_path=None,
+                                   freeze_magnn=True):
+    """
+    Train MAGNN-LSTM with Dual-Task MTL (Local + Global)
+
+    This uses SEGMENT-level data (not paths) with dual objectives:
+    - Local: Predict each segment duration
+    - Global: Predict total journey time from start to end
+    """
+    print_section("MAGNN-LSTM-DUALTASK-MTL TRAINING (Local + Global)")
+    num_segments = len(segment_types)
+
+    magnn_base = MAGTTE(num_segments, cfg.n_heads, cfg.node_embed_dim, cfg.gat_hidden,
+                        cfg.lstm_hidden, cfg.historical_dim, cfg.dropout).to(device)
+    magnn_base.set_adjacency_matrices(adj_geo, adj_dist, adj_soc)
+
+    if pretrained_magnn_path and os.path.exists(pretrained_magnn_path):
+        magnn_base.load_state_dict(torch.load(pretrained_magnn_path, map_location=device))
+        print(f"   ✓ Loaded pre-trained MAGNN")
+
+    model = MAGNN_LSTM_DualTaskMTL(
+        magnn_base,
+        cfg.gat_hidden,
+        4,  # operational_dim
+        8,  # weather_dim
+        5,  # temporal_dim
+        64,  # lstm_hidden
+        1,  # lstm_layers
+        0.2,  # dropout
+        64,  # local_hidden
+        128,  # global_hidden
+        freeze_magnn
+    ).to(device)
+
+    n_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
+    print(f"   Trainable params: {n_params:,}")
+    print(f"   Architecture: Dual-Task (Local segments + Global stations)")
+
+    optimizer = optim.Adam(
+        filter(lambda p: p.requires_grad, model.parameters()),
+        lr=cfg.learning_rate * 0.1,
+        weight_decay=cfg.weight_decay * 5
+    )
+    scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='min', factor=0.5, patience=5)
+
+    # Dual-task loss with uncertainty weighting
+    class DualTaskMTLLoss(nn.Module):
+        def __init__(self, criterion=None):
+            super().__init__()
+            self.criterion = criterion if criterion is not None else nn.SmoothL1Loss(reduction='none')
+
+        def forward(self, local_preds, global_pred, segment_targets, global_target,
+                    mask, log_var_local, log_var_global):
+            # Local loss (per-segment)
+            local_loss = self.criterion(local_preds, segment_targets)
+            if mask is not None:
+                mask_expanded = mask.unsqueeze(-1).float()
+                local_loss = (local_loss * mask_expanded).sum() / mask_expanded.sum().clamp(min=1)
+            else:
+                local_loss = local_loss.mean()
+
+            # Global loss (aggregate)
+            global_loss = self.criterion(global_pred, global_target).mean()
+
+            # Uncertainty weighting (Kendall et al. 2018)
+            precision_local = torch.exp(-log_var_local)
+            precision_global = torch.exp(-log_var_global)
+
+            total_loss = (
+                precision_local * local_loss + log_var_local +
+                precision_global * global_loss + log_var_global
+            )
+
+            return total_loss, {
+                'total': total_loss.item(),
+                'local': local_loss.item(),
+                'global': global_loss.item(),
+                'weight_local': precision_local.item(),
+                'weight_global': precision_global.item()
+            }
+
+    criterion = DualTaskMTLLoss(criterion=nn.SmoothL1Loss())
+
+    best_val_loss = float('inf')
+    patience_counter = 0
+    best_ckpt = os.path.join(output_folder, 'magnn_lstm_dualtask_mtl_best.pth')
+
+    print()
+    for epoch in range(1, cfg.n_epochs + 1):
+        model.train()
+        train_loss = 0.0
+        train_local_loss = 0.0
+        train_global_loss = 0.0
+        n_batches = 0
+
+        for batch in train_loader:
+            seg_idx, temporal, operational, weather, target, lengths, mask = batch
+            seg_idx = seg_idx.to(device)
+            temporal = temporal.to(device)
+            operational = operational.to(device)
+            weather = weather.to(device)
+            target = target.to(device)
+            mask = mask.to(device)
+
+            # Get predictions
+            local_preds, global_pred = model(
+                seg_idx, temporal, operational, weather, mask, return_local=True
+            )
+
+            # Targets
+            segment_targets = target.unsqueeze(1).expand(-1, local_preds.size(1), -1)
+            global_target = target
+
+            # Loss
+            loss, loss_dict = criterion(
+                local_preds, global_pred, segment_targets, global_target,
+                mask, model.mtl_head.log_var_local, model.mtl_head.log_var_global
+            )
+
+            if torch.isnan(loss) or torch.isinf(loss):
+                continue
+
+            optimizer.zero_grad()
+            loss.backward()
+            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+            optimizer.step()
+
+            train_loss += loss_dict['total']
+            train_local_loss += loss_dict['local']
+            train_global_loss += loss_dict['global']
+            n_batches += 1
+
+        train_loss /= max(n_batches, 1)
+        train_local_loss /= max(n_batches, 1)
+        train_global_loss /= max(n_batches, 1)
+
+        # Validation
+        model.eval()
+        val_loss = 0.0
+        val_preds, val_targets = [], []
+        n_val = 0
+
+        with torch.no_grad():
+            for batch in val_loader:
+                seg_idx, temporal, operational, weather, target, lengths, mask = batch
+                seg_idx = seg_idx.to(device)
+                temporal = temporal.to(device)
+                operational = operational.to(device)
+                weather = weather.to(device)
+                target = target.to(device)
+                mask = mask.to(device)
+
+                local_preds, global_pred = model(
+                    seg_idx, temporal, operational, weather, mask, return_local=True
+                )
+
+                segment_targets = target.unsqueeze(1).expand(-1, local_preds.size(1), -1)
+                global_target = target
+
+                loss, loss_dict = criterion(
+                    local_preds, global_pred, segment_targets, global_target,
+                    mask, model.mtl_head.log_var_local, model.mtl_head.log_var_global
+                )
+
+                if not torch.isnan(loss) and not torch.isinf(loss):
+                    val_loss += loss_dict['total']
+                    n_val += 1
+                    val_preds.append(global_pred.cpu().numpy())
+                    val_targets.append(target.cpu().numpy())
+
+        val_loss /= max(n_val, 1)
+        scheduler.step(val_loss)
+
+        if val_preds:
+            vp = scaler.inverse_transform(np.concatenate(val_preds))
+            vt = scaler.inverse_transform(np.concatenate(val_targets))
+            val_r2 = r2_score(vt, vp)
+        else:
+            val_r2 = float('nan')
+
+        if epoch % max(1, cfg.n_epochs // 5) == 0 or epoch == 1:
+            print(f"  Epoch {epoch:>3}/{cfg.n_epochs}  "
+                  f"train_loss={train_loss:.4f} (local:{train_local_loss:.4f} global:{train_global_loss:.4f})  "
+                  f"val_loss={val_loss:.4f}  val_R²={val_r2:.4f}")
+
+        if not np.isnan(val_loss) and val_loss < best_val_loss:
+            best_val_loss = val_loss
+            patience_counter = 0
+            torch.save(model.state_dict(), best_ckpt)
+        else:
+            patience_counter += 1
+            if patience_counter >= cfg.early_stopping_patience:
+                print(f"\n  ⏹️  Early stopping at epoch {epoch}")
+                break
+
+    if os.path.exists(best_ckpt):
+        model.load_state_dict(torch.load(best_ckpt, map_location=device))
+
+    print_section("MAGNN-LSTM-DUALTASK-MTL — FINAL RESULTS")
+
+    def _eval(loader, name):
+        model.eval()
+        preds, targets = [], []
+        with torch.no_grad():
+            for batch in loader:
+                seg_idx, temporal, operational, weather, target, lengths, mask = batch
+                seg_idx = seg_idx.to(device)
+                temporal = temporal.to(device)
+                operational = operational.to(device)
+                weather = weather.to(device)
+                mask = mask.to(device)
+
+                pred = model(seg_idx, temporal, operational, weather, mask, return_local=False)
+                preds.append(pred.cpu().numpy())
+                targets.append(target.cpu().numpy())
+
+        if not preds:
+            return {}
+
+        p = scaler.inverse_transform(np.concatenate(preds))
+        t = scaler.inverse_transform(np.concatenate(targets))
+        r2 = r2_score(t, p)
+        rmse = np.sqrt(mean_squared_error(t, p))
+        mae = mean_absolute_error(t, p)
+        mask_valid = t.flatten() > 0
+        mape = np.mean(np.abs((t.flatten()[mask_valid] - p.flatten()[mask_valid]) /
+                              t.flatten()[mask_valid])) * 100 if mask_valid.any() else float('nan')
+
+        print(f"   {name:<6}  R²={r2:.4f}  RMSE={rmse:.2f}s  MAE={mae:.2f}s  MAPE={mape:.2f}%")
+        return {'r2': r2, 'rmse': rmse, 'mae': mae, 'mape': mape,
+                'preds': p.flatten().tolist(), 'actual': t.flatten().tolist()}
+
+    results = {'Train': _eval(train_loader, 'Train'),
+               'Val': _eval(val_loader, 'Val'),
+               'Test': _eval(test_loader, 'Test')}
+
+    test_res = results.get('Test', {})
+    if test_res.get('preds'):
+        print(f"\n{'Idx':>4}  {'Actual(s)':>10}  {'Pred(s)':>10}  {'Error(s)':>9}  {'Error%':>7}")
+        print("  " + "-" * 48)
+        for i in range(min(20, len(test_res['actual']))):
+            a, p = test_res['actual'][i], test_res['preds'][i]
+            err = p - a
+            epct = (err / a * 100) if a > 0 else 0.0
+            print(f"  {i:>3}  {a:>10.2f}  {p:>10.2f}  {err:>9.2f}  {epct:>6.2f}%")
 
     return results, model
 
