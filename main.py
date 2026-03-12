@@ -9,27 +9,50 @@ Entry point for MAGNN-LSTM transit travel time prediction.
    3. MAGNN-LSTM-DualTaskMTL (✅ NEW: Local segments + Global stations)
 
 Usage:
-    python main.py                  # Train MAGNN only (baseline)
-    python main.py --compare-all    # Compare all three models
-    python main.py --ablation       # Feature ablation studies
+    python main.py                      # defaults (sample from config, hdbscan)
+    python main.py 0.1                  # 10% sample, hdbscan
+    python main.py 1.0 knn             # 100% sample, KNN clustering
+    python main.py 0.5 dbscan          # 50% sample, DBSCAN clustering
+    python main.py --compare-all        # Compare all three models
+    python main.py --ablation           # Feature ablation studies
+    python main.py 0.1 knn --compare-all  # combine all options
 
-HOW TO SWITCH CLUSTERING METHOD
---------------------------------
-Change only the single import line below:
-
-    from cluster_hdbscan import event_driven_clustering_fixed   # default
-    from cluster_dbscan  import event_driven_clustering_fixed
-    from cluster_knn     import event_driven_clustering_fixed
-    from cluster_gmm     import event_driven_clustering_fixed
-    from cluster_kmeans  import event_driven_clustering_fixed
+Supported clustering methods: hdbscan, dbscan, knn, gmm, kmeans
+Both sample_fraction and method are optional and can appear in any order.
 """
 
 # =============================================================================
-# CLUSTERING METHOD — change this ONE line to swap methods
+# DYNAMIC CLUSTERING — resolved at runtime from CLI args
 # =============================================================================
-from cluster_hdbscan import event_driven_clustering_fixed  # ← swap here
+import sys
+import importlib
 
-ALGORITHM_NAME = event_driven_clustering_fixed.__module__.replace('cluster_', '').upper()
+VALID_METHODS = {'hdbscan', 'dbscan', 'knn', 'gmm', 'kmeans'}
+
+# --- Parse CLI args (sample fraction, clustering method, mode flag) ---
+_sample_fraction_cli = None          # None → use Config default
+_cluster_method = 'hdbscan'          # default clustering method
+_mode = None                         # None → baseline main()
+
+for _arg in sys.argv[1:]:
+    if _arg in ('--compare-all', '--ablation'):
+        _mode = _arg
+    elif _arg.lower() in VALID_METHODS:
+        _cluster_method = _arg.lower()
+    else:
+        try:
+            _sample_fraction_cli = float(_arg)
+        except ValueError:
+            print(f"⚠️  Unknown argument '{_arg}' — ignored.")
+            print(f"   Valid methods: {', '.join(sorted(VALID_METHODS))}")
+            print(f"   Valid flags:   --compare-all, --ablation")
+            print(f"   Or pass a number for sample fraction (e.g. 0.1)")
+
+# Dynamically import the chosen clustering module
+_cluster_module = importlib.import_module(f'cluster_{_cluster_method}')
+event_driven_clustering_fixed = _cluster_module.event_driven_clustering_fixed
+
+ALGORITHM_NAME = _cluster_method.upper()
 
 # =============================================================================
 # SHARED MODULES
@@ -1367,10 +1390,10 @@ def main_with_ablation_study():
         print(f"  Total iterations: {len(all_full_results)}")
         print(f"  Model: MAGNN-LSTM-Residual")
         print(f"\n  Variants tested:")
-        print(f"    Full: All features (spatial + temporal + operational + weather)")
-        print(f"    No Operational: Weather only (spatial + temporal + weather)")
-        print(f"    No Weather: Operational only (spatial + temporal + operational)")
-        print(f"    Baseline: Spatial + temporal features only")
+        print(f"    MAGNN-LSTM-Residual (Full): All features")
+        print(f"    MAGNN-LSTM-Residual (No Operational): Weather features only")
+        print(f"    MAGNN-LSTM-Residual (No Weather): Operational features only")
+        print(f"    MAGNN-LSTM-Residual (Baseline): Spatial + temporal features only")
         print(f"\n  Results saved in: outputs/{ALGORITHM_NAME}_*_ablation/")
         print("=" * 80)
 
@@ -1452,18 +1475,16 @@ def print_ablation_comparison_table(full_results, no_op_results, no_weather_resu
 # =============================================================================
 
 if __name__ == '__main__':
-    import sys
+    # Apply CLI sample fraction override (if provided)
+    if _sample_fraction_cli is not None:
+        Config.sample_fraction = _sample_fraction_cli
 
-    if len(sys.argv) > 1:
-        if sys.argv[1] == '--compare-all':
-            main_with_three_way_comparison()
-        elif sys.argv[1] == '--ablation':
-            main_with_ablation_study()
-        else:
-            print(f"Unknown argument: {sys.argv[1]}")
-            print("\nUsage:")
-            print("  python main.py                # Train MAGNN only")
-            print("  python main.py --compare-all  # Compare MAGNN vs Residual vs DualTaskMTL")
-            print("  python main.py --ablation     # Feature ablation study")
+    print(f"🔧 Clustering method : {ALGORITHM_NAME}")
+    print(f"🔧 Sample fraction   : {Config.sample_fraction}")
+
+    if _mode == '--compare-all':
+        main_with_three_way_comparison()
+    elif _mode == '--ablation':
+        main_with_ablation_study()
     else:
         main()
