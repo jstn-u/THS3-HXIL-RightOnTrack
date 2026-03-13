@@ -1,7 +1,10 @@
 """
-dbscan.py
+cluster_dbscan.py
 =================
-DBSCAN-based clustering with adaptive eps via binary search.
+DBSCAN-based clustering with density-adaptive eps via k-distance elbow method.
+
+The cluster count is fully data-driven — DBSCAN discovers natural density
+regions without requiring a target number of clusters.
 
 Public API (identical across all cluster_*.py modules):
     event_driven_clustering_fixed(df, known_stops=None)
@@ -26,14 +29,15 @@ from config import print_section, haversine_meters
 # DBSCAN CLUSTERING
 # =============================================================================
 
-def simple_clustering(df, n_clusters=50, speed_threshold=2.0):
+def simple_clustering(df, speed_threshold=2.0):
     """
     Cluster transit stops using DBSCAN (Density-Based Spatial Clustering).
 
     This function identifies potential transit stops by filtering low-speed GPS
     points, then applies DBSCAN clustering to discover natural groupings based
-    on spatial density. Unlike K-means or KNN-based methods, DBSCAN does not
-    require specifying the number of clusters beforehand.
+    on spatial density.  Unlike K-Means or GMM, DBSCAN does NOT require
+    specifying the number of clusters — the count emerges naturally from the
+    data's density structure.
 
     DBSCAN Algorithm Overview:
         DBSCAN groups points based on local density. It defines clusters as
@@ -54,27 +58,26 @@ def simple_clustering(df, n_clusters=50, speed_threshold=2.0):
         1. Filter low-speed points (potential stops where vehicles pause)
         2. Remove outliers and invalid coordinates
         3. Convert coordinates to radians for Haversine distance
-        4. Apply DBSCAN with Haversine metric via BallTree
-        5. Extract cluster centers as centroids of each cluster
-        6. Filter out noise points (label = -1)
-        7. Calculate cluster metadata and statistics
+        4. Determine optimal eps via k-distance elbow method
+        5. Apply DBSCAN with Haversine metric via BallTree
+        6. Extract cluster centers as centroids of each cluster
+        7. Filter out noise points (label = -1)
+        8. Calculate cluster metadata and statistics
 
     Args:
         df (pd.DataFrame): Transit GPS data with required columns:
             - 'latitude': GPS latitude coordinate (float)
             - 'longitude': GPS longitude coordinate (float)
             - 'speed_mps' (optional): Speed in meters per second (float)
-        n_clusters (int): Target number of clusters (used to auto-tune eps).
-            Default is 50. Note: DBSCAN may produce more or fewer clusters
-            depending on data density.
         speed_threshold (float): Maximum speed (m/s) to consider a point as a
             potential stop. Points with speed >= threshold are excluded.
             Default is 2.0 m/s (~7.2 km/h, typical walking speed).
 
     Returns:
         tuple: A tuple containing:
-            - cluster_centers (np.ndarray): Array of shape (n_clusters, 2) with
-              [latitude, longitude] for each cluster center.
+            - cluster_centers (np.ndarray): Array of shape (N, 2) with
+              [latitude, longitude] for each cluster center.  N is determined
+              naturally by the data's density structure.
             - cluster_info (dict): Dictionary mapping cluster index to metadata:
               {
                   'center': (lat, lon),       # Cluster centroid
@@ -91,7 +94,7 @@ def simple_clustering(df, n_clusters=50, speed_threshold=2.0):
             This ensures no silent fallback to different algorithms.
 
     Example:
-        >>> clusters, info = simple_clustering(train_df, n_clusters=50)
+        >>> clusters, info = simple_clustering(train_df)
         >>> print(f"Found {len(clusters)} clusters")
         Found 47 clusters
         >>> print(f"Cluster 0: center={info[0]['center']}, size={info[0]['size']}")
@@ -99,9 +102,10 @@ def simple_clustering(df, n_clusters=50, speed_threshold=2.0):
 
     Notes:
         - Uses Haversine distance metric for geographic accuracy
-        - eps is auto-calculated based on data spread and target cluster count
+        - eps is auto-calculated via k-distance elbow method (data-driven)
+        - Cluster count is data-driven — no target count needed
         - Noise points are automatically excluded from clusters
-        - No fallback algorithm - fails explicitly if DBSCAN cannot cluster
+        - No fallback algorithm — fails explicitly if DBSCAN cannot cluster
         - Computational complexity: O(n²) worst case, O(n log n) with BallTree
 
     Parameter Tuning Guide:
@@ -175,7 +179,7 @@ def simple_clustering(df, n_clusters=50, speed_threshold=2.0):
     print(f"✓ Using {len(coords):,} valid coordinates for clustering")
 
     # =========================================================================
-    # STEP 5: Calculate DBSCAN Parameters (TARGET-BASED ADAPTIVE)
+    # STEP 5: Calculate DBSCAN Parameters (DENSITY-ADAPTIVE)
     # =========================================================================
     n_points = len(coords)
     coord_values = coords[['latitude', 'longitude']].values
@@ -215,48 +219,59 @@ def simple_clustering(df, n_clusters=50, speed_threshold=2.0):
     eps_high = min(eps_high, EPS_CEILING)
 
     print(f"  Median nearest-neighbour distance: {median_nn_meters:.1f}m")
-    print(f"  Search bounds: [{eps_low*6_371_000:.1f}m, {eps_high*6_371_000:.1f}m]")
-    print(f"\n✓ Searching for optimal eps to achieve ~{n_clusters} clusters...")
+    print(f"  Bounds: [{eps_low*6_371_000:.1f}m, {eps_high*6_371_000:.1f}m]")
+    print(f"\n✓ Finding optimal eps using k-distance elbow method...")
 
-    # Binary search — capped at 10 iterations
-    target_clusters = n_clusters
-    best_eps = (eps_low + eps_high) / 2
-    best_diff = float('inf')
-    best_n_clusters = 0
+    # =========================================================================
+    # K-DISTANCE ELBOW METHOD — FINDING OPTIMAL EPS (no external dependencies)
+    #
+    # Classic DBSCAN parameter selection (Ester et al. 1996):
+    #   1. Compute the distance to each point's k-th nearest neighbour
+    #      (k = min_samples).
+    #   2. Sort those distances in ascending order → the "k-distance plot".
+    #   3. The optimal eps is at the "elbow" — where the sorted curve bends
+    #      sharply upward, separating dense cluster interiors from sparse
+    #      noise / inter-cluster gaps.
+    #
+    # We detect the elbow by finding the point of maximum curvature: draw a
+    # straight line from the first to the last point on the sorted curve,
+    # then pick the point with the greatest perpendicular distance from
+    # that line.
+    # =========================================================================
+    k_for_eps = min_samples  # standard: use same k as min_samples
 
-    for iteration in range(10):
-        eps_mid = (eps_low + eps_high) / 2
+    nn_eps = _NN(n_neighbors=k_for_eps + 1, metric='haversine', algorithm='ball_tree')
+    nn_eps.fit(unique_sample)
+    k_dists_all, _ = nn_eps.kneighbors(unique_sample)
+    k_distances = np.sort(k_dists_all[:, k_for_eps])  # k-th NN distance, sorted
 
-        dbscan_test = DBSCAN(
-            eps=eps_mid,
-            min_samples=min_samples,
-            metric='haversine',
-            algorithm='ball_tree',
-            n_jobs=-1
-        )
-        test_labels = dbscan_test.fit_predict(sample_coords)
+    # --- Elbow detection via max perpendicular distance ---
+    n_pts = len(k_distances)
+    x = np.arange(n_pts, dtype=float)
+    y = k_distances
 
-        unique_test = np.unique(test_labels)
-        n_found = len(unique_test) - (1 if unique_test[0] == -1 else 0)
+    # Line from first to last point
+    p1 = np.array([x[0], y[0]])
+    p2 = np.array([x[-1], y[-1]])
+    line_vec = p2 - p1
+    line_len = np.linalg.norm(line_vec)
 
-        diff = abs(n_found - target_clusters)
-        if diff < best_diff:
-            best_diff = diff
-            best_eps  = eps_mid
-            best_n_clusters = n_found
+    if line_len < 1e-12:
+        # Degenerate case — all distances identical
+        eps_radians = float(np.clip(y[0], EPS_FLOOR, EPS_CEILING))
+    else:
+        line_unit = line_vec / line_len
+        # Perpendicular distance of every point to the line
+        point_vecs = np.column_stack([x - p1[0], y - p1[1]])
+        projections = point_vecs @ line_unit
+        proj_points = np.outer(projections, line_unit)
+        perp_vecs = point_vecs - proj_points
+        perp_dists = np.linalg.norm(perp_vecs, axis=1)
 
-        if n_found > target_clusters:
-            eps_low = eps_mid
-        elif n_found < target_clusters:
-            eps_high = eps_mid
-        else:
-            break
+        elbow_idx = int(np.argmax(perp_dists))
+        eps_radians = float(np.clip(k_distances[elbow_idx], EPS_FLOOR, EPS_CEILING))
 
-        if diff <= 5:
-            break
-
-    eps_radians = best_eps
-    eps_meters  = eps_radians * 6_371_000
+    eps_meters = eps_radians * 6_371_000
 
     lat_range = coord_values[:, 0].max() - coord_values[:, 0].min()
     lon_range = coord_values[:, 1].max() - coord_values[:, 1].min()
@@ -264,16 +279,16 @@ def simple_clustering(df, n_clusters=50, speed_threshold=2.0):
     density = n_points / (area + 1e-9)
 
     print(f"\n{'='*60}")
-    print(f"DBSCAN PARAMETERS (TARGET-BASED ADAPTIVE)")
+    print(f"DBSCAN PARAMETERS (DENSITY-ADAPTIVE)")
     print(f"{'='*60}")
     print(f"  Data points: {n_points:,}")
     print(f"  Geographic area: {lat_range:.4f}° × {lon_range:.4f}°")
     print(f"  Point density: {density:.1f} points/deg²")
-    print(f"  Target clusters: {target_clusters}")
-    print(f"  Estimated clusters: {best_n_clusters}")
+    print(f"  Cluster count: data-driven (no target)")
     print(f"  eps (epsilon): {eps_radians:.6f} radians")
     print(f"  eps in meters: ~{eps_meters:.1f}m radius")
     print(f"  min_samples: {min_samples}")
+    print(f"  Method: k-distance elbow (k={k_for_eps})")
     print(f"{'='*60}")
 
     # =========================================================================
@@ -407,8 +422,7 @@ def simple_clustering(df, n_clusters=50, speed_threshold=2.0):
 
 def event_driven_clustering_fixed(df, known_stops=None):
     """
-    Adapter: replaces HDBSCAN-based clustering with DBSCAN-based clustering
-    via `simple_clustering`.
+    Adapter: DBSCAN-based clustering via `simple_clustering`.
 
     Returns the same two-value tuple expected by the rest of the pipeline:
         cluster_centers     : np.ndarray  shape (N, 2)  — [lat, lon] per cluster
@@ -419,9 +433,8 @@ def event_driven_clustering_fixed(df, known_stops=None):
     used by DBSCAN — the algorithm discovers cluster locations automatically
     from data density without requiring named anchor points.
 
-    Key difference from HDBSCAN: eps is auto-tuned via binary search to
-    target approximately 50 clusters, whereas HDBSCAN required min_cluster_size
-    and min_samples. Both use Haversine distance on GPS coordinates.
+    eps is determined via the k-distance elbow method — the cluster count
+    emerges naturally from the data's density structure.
     """
     print_section("EVENT-DRIVEN CLUSTERING  (DBSCAN adapter)")
 
@@ -429,7 +442,7 @@ def event_driven_clustering_fixed(df, known_stops=None):
         print(f"   Note: known_stops ({len(known_stops)} entries) received "
               f"but not used — DBSCAN is fully data-driven.")
 
-    cluster_centers, cluster_info = simple_clustering(df, n_clusters=50)
+    cluster_centers, cluster_info = simple_clustering(df)
 
     # Empty set: DBSCAN does not pre-label any cluster as a named station.
     # Downstream MAGNN code that checks station_cluster_ids still runs
@@ -445,4 +458,3 @@ def event_driven_clustering_fixed(df, known_stops=None):
 # =============================================================================
 # SEGMENT BUILDING - CORRECTED VERSION
 # =============================================================================
-

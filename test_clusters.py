@@ -26,6 +26,7 @@ import os
 import sys
 import csv
 import json
+import time
 import warnings
 from datetime import datetime
 from torch.utils.data import DataLoader
@@ -41,7 +42,8 @@ from model import (SegmentDataset, masked_collate_fn, train_magtte)
 # ============================================================================
 # SWEEP SETTINGS
 # ============================================================================
-CLUSTER_SIZES = [500, 750, 1000, 1250, 1500]
+# CLUSTER_SIZES = [50, 100, 150]
+CLUSTER_SIZES = [100, 150]
 ALGORITHMS = ['gmm', 'kmeans']
 
 
@@ -51,6 +53,8 @@ def run_single_experiment(method, n_clusters, config, run_folder):
 
     Returns a dict with metrics, or None if the run failed.
     """
+    experiment_start = time.time()
+
     module = importlib.import_module(f'cluster_{method}')
     event_driven_clustering_fixed = module.event_driven_clustering_fixed
     algo_name = method.upper()
@@ -170,6 +174,11 @@ def run_single_experiment(method, n_clusters, config, run_folder):
     # ------------------------------------------------------------------
     # 8. Save metrics.json (per-run, same format as main.py)
     # ------------------------------------------------------------------
+    elapsed_seconds = time.time() - experiment_start
+    elapsed_minutes = elapsed_seconds / 60
+    elapsed_formatted = f"{int(elapsed_minutes)}m {int(elapsed_seconds % 60)}s"
+    print(f"\n⏱  Experiment took {elapsed_formatted} ({elapsed_seconds:.1f}s)")
+
     metrics_out = {
         'graph_method': method,
         'config': {
@@ -186,6 +195,10 @@ def run_single_experiment(method, n_clusters, config, run_folder):
             'historical_dim':  config.historical_dim,
         },
         'timestamp': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+        'duration': {
+            'seconds': round(elapsed_seconds, 1),
+            'formatted': elapsed_formatted,
+        },
     }
 
     for split_name in ['Train', 'Val', 'Test']:
@@ -214,6 +227,8 @@ def run_single_experiment(method, n_clusters, config, run_folder):
         'train_samples':  len(train_dataset),
         'val_samples':    len(val_dataset),
         'test_samples':   len(test_dataset),
+        'duration_seconds': round(elapsed_seconds, 1),
+        'duration':       elapsed_formatted,
         'output_folder':  output_folder,
     }
 
@@ -317,6 +332,7 @@ def main():
         'Train_R2', 'Train_RMSE', 'Train_MAE', 'Train_MAPE',
         'Val_R2',   'Val_RMSE',   'Val_MAE',   'Val_MAPE',
         'Test_R2',  'Test_RMSE',  'Test_MAE',  'Test_MAPE',
+        'duration_seconds', 'duration',
         'output_folder',
     ]
 
@@ -331,7 +347,7 @@ def main():
     print_section("CLUSTER SWEEP RESULTS")
 
     header = f"{'Algorithm':<10} {'Clusters':>8} {'Train R²':>9} {'Val R²':>9} " \
-             f"{'Test R²':>9} {'Test RMSE':>10} {'Test MAE':>9} {'Test MAPE':>10}"
+             f"{'Test R²':>9} {'Test RMSE':>10} {'Test MAE':>9} {'Test MAPE':>10} {'Duration':>10}"
     print(header)
     print("-" * len(header))
 
@@ -342,8 +358,9 @@ def main():
         rmse = f"{row['Test_RMSE']:.2f}" if row['Test_RMSE'] is not None else '   N/A'
         mae  = f"{row['Test_MAE']:.2f}"  if row['Test_MAE']  is not None else '   N/A'
         mape = f"{row['Test_MAPE']:.2f}%" if row['Test_MAPE'] is not None else '    N/A'
+        dur  = row.get('duration', 'N/A')
         print(f"{row['algorithm']:<10} {row['cluster_count']:>8} {tr2:>9} "
-              f"{vr2:>9} {ter2:>9} {rmse:>10} {mae:>9} {mape:>10}")
+              f"{vr2:>9} {ter2:>9} {rmse:>10} {mae:>9} {mape:>10} {dur:>10}")
 
     # ------------------------------------------------------------------
     # Determine the best cluster count per algorithm
@@ -372,6 +389,7 @@ def main():
         print(f"       Test RMSE = {best['Test_RMSE']:.2f} seconds")
         print(f"       Test MAE  = {best['Test_MAE']:.2f} seconds")
         print(f"       Test MAPE = {best['Test_MAPE']:.2f}%")
+        print(f"       Duration  = {best.get('duration', 'N/A')}")
 
     # ------------------------------------------------------------------
     # Save best-per-algorithm summary to JSON
@@ -393,6 +411,8 @@ def main():
             'Test_MAPE': best['Test_MAPE'],
             'Train_R2':  best['Train_R2'],
             'Val_R2':    best['Val_R2'],
+            'duration_seconds': best.get('duration_seconds'),
+            'duration':  best.get('duration'),
             'output_folder': best['output_folder'],
         }
 

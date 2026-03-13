@@ -247,20 +247,25 @@ def main():
             # ------------------------------------------------------------------
             # 8. Save metrics JSON
             # ------------------------------------------------------------------
+            DATA_DRIVEN_METHODS = {'knn', 'hdbscan', 'dbscan'}
+
+            metrics_config = {
+                'n_epochs': config.n_epochs,
+                'batch_size': config.batch_size,
+                'learning_rate': config.learning_rate,
+                'sample_fraction': config.sample_fraction,
+                'n_clusters': len(clusters),
+                'cluster_count_method': 'data-driven' if _cluster_method in DATA_DRIVEN_METHODS else 'requested',
+                'n_segment_types': len(segment_types),
+                'node_embed_dim': config.node_embed_dim,
+                'gat_hidden': config.gat_hidden,
+                'lstm_hidden': config.lstm_hidden,
+                'historical_dim': config.historical_dim,
+            }
+
             metrics_out = {
                 'graph_method': ALGORITHM_NAME.lower(),
-                'config': {
-                    'n_epochs': config.n_epochs,
-                    'batch_size': config.batch_size,
-                    'learning_rate': config.learning_rate,
-                    'sample_fraction': config.sample_fraction,
-                    'n_clusters': len(clusters),
-                    'n_segment_types': len(segment_types),
-                    'node_embed_dim': config.node_embed_dim,
-                    'gat_hidden': config.gat_hidden,
-                    'lstm_hidden': config.lstm_hidden,
-                    'historical_dim': config.historical_dim,
-                },
+                'config': metrics_config,
                 'timestamp': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
             }
 

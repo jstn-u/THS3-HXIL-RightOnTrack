@@ -15,7 +15,6 @@ To switch clustering method in main.py, change only:
 import numpy as np
 import pandas as pd
 from sklearn.neighbors import NearestNeighbors, BallTree
-from sklearn.cluster import AgglomerativeClustering
 from scipy.sparse import lil_matrix
 from scipy.sparse.csgraph import connected_components
 import warnings
@@ -28,22 +27,24 @@ from config import print_section, haversine_meters
 # KNN GRAPH CLUSTERING
 # =============================================================================
 
-def simple_clustering(df, n_clusters=50, speed_threshold=2.0, known_stops=None, station_exclusion_radius_m=300):
+def simple_clustering(df, speed_threshold=2.0, known_stops=None, station_exclusion_radius_m=300):
     """
     Cluster transit stops using K-Nearest Neighbors (KNN) graph-based clustering.
 
     This function identifies potential transit stops by filtering low-speed GPS points,
     builds a KNN graph where each point connects to its K nearest neighbors, then
-    extracts clusters from connected components or applies spectral clustering on
-    the resulting graph.
+    extracts clusters from connected components of the resulting graph.
+
+    Unlike K-Means or GMM, this algorithm does NOT require a target cluster count.
+    The number of clusters emerges naturally from the data's connectivity structure.
 
     Algorithm Steps:
         1. Filter low-speed points (potential stops where vehicles pause)
         2. Remove outliers and invalid coordinates
         3. Build KNN graph using BallTree for efficient nearest neighbor search
         4. Create mutual KNN graph (symmetric connections)
-        5. Find connected components as initial clusters
-        6. Merge small clusters and split large ones to reach target count
+        5. Find connected components as natural clusters
+        6. Filter out micro-components (noise)
         7. Calculate cluster centers as centroids
 
     Args:
@@ -51,16 +52,15 @@ def simple_clustering(df, n_clusters=50, speed_threshold=2.0, known_stops=None, 
             - 'latitude': GPS latitude coordinate (float)
             - 'longitude': GPS longitude coordinate (float)
             - 'speed_mps' (optional): Speed in meters per second (float)
-        n_clusters (int): Target number of clusters to create. Default is 50.
-            Actual number may vary based on data connectivity.
         speed_threshold (float): Maximum speed (m/s) to consider a point as a
             potential stop. Points with speed >= threshold are excluded.
             Default is 2.0 m/s (~7.2 km/h, typical walking speed).
 
     Returns:
         tuple: A tuple containing:
-            - cluster_centers (np.ndarray): Array of shape (n_clusters, 2) with
-              [latitude, longitude] for each cluster center.
+            - cluster_centers (np.ndarray): Array of shape (N, 2) with
+              [latitude, longitude] for each cluster center. N is determined
+              naturally by the data's connectivity structure.
             - cluster_info (dict): Dictionary mapping cluster index to metadata:
               {
                   'center': (lat, lon),      # Cluster centroid
@@ -73,7 +73,7 @@ def simple_clustering(df, n_clusters=50, speed_threshold=2.0, known_stops=None, 
         No exceptions raised; returns empty arrays if clustering fails.
 
     Example:
-        >>> clusters, info = simple_clustering(train_df, n_clusters=50)
+        >>> clusters, info = simple_clustering(train_df)
         >>> print(f"Found {len(clusters)} clusters")
         Found 47 clusters
         >>> print(f"Cluster 0: center={info[0]['center']}, size={info[0]['size']}")
@@ -83,7 +83,8 @@ def simple_clustering(df, n_clusters=50, speed_threshold=2.0, known_stops=None, 
         - Uses Haversine distance for geographic accuracy
         - K value is auto-calculated based on data density
         - Mutual KNN ensures symmetric relationships (A→B implies B→A)
-        - Small clusters (<3 points) are merged with nearest neighbor
+        - Cluster count is data-driven — no target count needed
+        - Small clusters (<min_component_size points) are filtered as noise
         - Computational complexity: O(n * k * log(n)) for KNN search
 
     References:
@@ -242,7 +243,7 @@ def simple_clustering(df, n_clusters=50, speed_threshold=2.0, known_stops=None, 
     print(f"  K at elbow point: {k_elbow}")
     print(f"  Density factor: {density_factor:.3f}")
     print(f"  Final K value: {k_neighbors}")
-    print(f"  Target clusters: ~{n_clusters}")
+    print(f"  Cluster count: data-driven (no target)")
     print(f"{'='*60}")
 
     # =========================================================================
@@ -303,15 +304,11 @@ def simple_clustering(df, n_clusters=50, speed_threshold=2.0, known_stops=None, 
     # =========================================================================
     # STEP 9: Calculate component centres, filtering micro-components
     #
-    # Dynamic min_size prevents hundreds of 3-point micro-clusters forming
-    # before the merge stage.  We use n_points / (n_clusters * 3) so that
-    # roughly 3x the target number of components survive, giving the
-    # agglomerative step enough material to work with while discarding noise.
+    # We use a fixed minimum size threshold to filter out genuine noise
+    # (isolated 1-2 GPS pings with no real neighbours).  The cluster count
+    # emerges naturally from the data's connectivity — no target needed.
     # =========================================================================
-    # Keep this threshold low — it only filters genuine isolated noise points
-    # (1-2 GPS pings with no neighbours).  AgglomerativeClustering in Step 11
-    # does all meaningful merging, so we do NOT need to be aggressive here.
-    min_component_size = max(3, n_points // (n_clusters * 20))
+    min_component_size = max(3, n_points // 1000)
     print(f"  Dynamic min component size: {min_component_size} points")
 
     component_centers = []   # [lat, lon] per surviving component
@@ -353,61 +350,30 @@ def simple_clustering(df, n_clusters=50, speed_threshold=2.0, known_stops=None, 
     component_sizes   = np.array(component_sizes)
 
     # =========================================================================
-    # STEP 11: Agglomerative clustering on component centroids -> n_clusters
+    # STEP 11: Build final cluster list directly from surviving components
     #
-    # WHY THIS IS BETTER THAN THE PREVIOUS GREEDY MERGE
-    # --------------------------------------------------
-    # The old approach was O(n^3): for each of (m - target) merge steps it
-    # scanned all pairwise centroid distances from scratch.  With m=500 and
-    # target=50 that is ~28 million haversine calls.
-    #
-    # AgglomerativeClustering uses Ward linkage on the centroid array and
-    # runs in O(m^2 log m).  For m=500 that is ~1 million operations -- 28x
-    # faster -- and scipy's implementation is in optimised C.
-    #
-    # We work on centroids (not raw GPS points) so n here is the number of
-    # surviving components (typically 50-300), not the raw point count
-    # (which can be tens of thousands).  This keeps memory small too.
-    #
-    # The final cluster centre for each agglomerative group is the
-    # size-weighted mean of its component centroids, which is identical to
-    # what the greedy merge produced but computed correctly in one pass.
+    # No agglomerative merging — KNN's strength is finding natural data
+    # structure.  Forcing a target cluster count via merging can combine
+    # geographically distant clusters and defeats the purpose of using a
+    # data-driven method.  The cluster count is whatever the connectivity
+    # structure produces after noise filtering.
     # =========================================================================
-    actual_n = min(n_clusters, n_components_kept)
-
-    if n_components_kept > actual_n:
-        print(f"  Agglomerative merge: {n_components_kept} components -> {actual_n} clusters ...")
-        agg = AgglomerativeClustering(n_clusters=actual_n, linkage='ward')
-        agg_labels = agg.fit_predict(component_centers)
-    else:
-        # Already at or below target — no merge needed
-        agg_labels = np.arange(n_components_kept)
-        print(f"  Components ({n_components_kept}) already <= target ({actual_n}), no merge needed.")
-
     cluster_centers = []
     cluster_info    = {}
 
-    for cid in range(actual_n):
-        mask   = agg_labels == cid
-        if not mask.any():
-            continue
-        sizes_in_group  = component_sizes[mask]
-        centers_in_group = component_centers[mask]
-        total_size = sizes_in_group.sum()
-        # Size-weighted centroid
-        weighted_center = (centers_in_group * sizes_in_group[:, None]).sum(axis=0) / total_size
-        idx = len(cluster_centers)
-        cluster_centers.append(weighted_center)
+    for idx in range(n_components_kept):
+        center = component_centers[idx]
+        size   = component_sizes[idx]
+        cluster_centers.append(center)
         cluster_info[idx] = {
-            'center': (weighted_center[0], weighted_center[1]),
-            'size': int(total_size),
-            'method': 'knn_graph+agglomerative',
+            'center': (center[0], center[1]),
+            'size': int(size),
+            'method': 'knn_graph',
             'k_neighbors': k_neighbors,
-            'n_components_merged': int(mask.sum()),
         }
 
     cluster_centers = np.array(cluster_centers)
-    print(f"  After agglomerative merge: {len(cluster_centers)} clusters")
+    print(f"  Natural cluster count: {len(cluster_centers)}")
 
     # =========================================================================
     # STEP 12: Print Summary Statistics
@@ -418,7 +384,7 @@ def simple_clustering(df, n_clusters=50, speed_threshold=2.0, known_stops=None, 
     print(f"  Algorithm: Mutual K-Nearest Neighbors Graph")
     print(f"  K value: {k_neighbors}")
     print(f"  Input points: {n_points:,}")
-    print(f"  Output clusters: {len(cluster_centers)}")
+    print(f"  Output clusters: {len(cluster_centers)} (data-driven)")
 
     if cluster_info:
         sizes = [info['size'] for info in cluster_info.values()]
@@ -474,9 +440,9 @@ def event_driven_clustering_fixed(df, known_stops=None):
     # ------------------------------------------------------------------
     # 2. KNN clustering on the full dataframe
     # ------------------------------------------------------------------
-    knn_centers, _ = simple_clustering(df, n_clusters=50,
-                                             known_stops=known_stops,
-                                             station_exclusion_radius_m=MERGE_RADIUS_M)
+    knn_centers, _ = simple_clustering(df,
+                                       known_stops=known_stops,
+                                       station_exclusion_radius_m=MERGE_RADIUS_M)
 
     # ------------------------------------------------------------------
     # 3. Drop any KNN cluster within MERGE_RADIUS_M of a known station
