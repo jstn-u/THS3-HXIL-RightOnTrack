@@ -662,6 +662,24 @@ def main_with_three_way_comparison():
             test_segments = build_segments_fixed(test_df, clusters)
             val_segments = build_segments_fixed(val_df, clusters)
 
+            # ------------------------------------------------------------------
+            # [3b/10] Generate cluster / segment visualisations
+            #         (same helpers as normal main() — no pipeline changes)
+            # ------------------------------------------------------------------
+            print("[3b/10] Generating visualisations...")
+            plot_clusters(clusters, {},
+                          algorithm_name=ALGORITHM_NAME,
+                          save_path=os.path.join(output_folder,
+                                                  f'{ALGORITHM_NAME.lower()}-clusters.png'))
+            plot_segments(train_segments, clusters, max_segments=100,
+                          algorithm_name=ALGORITHM_NAME,
+                          save_path=os.path.join(output_folder,
+                                                  f'{ALGORITHM_NAME.lower()}-segments.png'))
+            plot_segment_statistics(train_segments,
+                                    algorithm_name=ALGORITHM_NAME,
+                                    save_path=os.path.join(output_folder,
+                                                           f'{ALGORITHM_NAME.lower()}-segment_stats.png'))
+
             print("[4/10] Building adjacency matrices...")
             adj_geo, adj_dist, adj_soc, segment_types = build_adjacency_matrices_fixed(
                 train_segments, clusters, known_stops=known_stops
