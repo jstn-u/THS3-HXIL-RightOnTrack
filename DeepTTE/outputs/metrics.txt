@@ -1,0 +1,726 @@
+
+=== VALIDATION ===
+Pooling: attention
+Kernel Size: 3
+Alpha: 0.1
+Data Ratio: 0.1
+MAE  : 17.699298681108935
+RMSE : 21.639793709079925
+MAPE : 50.515038764010725
+R2   : -0.10039401274313287
+----------------------------------------
+
+=== VALIDATION ===
+Pooling: attention
+Kernel Size: 3
+Alpha: 0.1
+Data Ratio: 0.1
+MAE  : 35.28251973579304
+RMSE : 40.787261577470645
+MAPE : 83.64827797773236
+R2   : -2.9092287337861222
+----------------------------------------
+
+=== VALIDATION ===
+Pooling: attention
+Kernel Size: 3
+Alpha: 0.1
+Data Ratio: 0.1
+MAE  : 45.22615156575812
+RMSE : 49.745590203088355
+MAPE : 123.84421272299868
+R2   : -4.815019317597075
+----------------------------------------
+
+=== VALIDATION ===
+Pooling: attention
+Kernel Size: 3
+Alpha: 0.1
+Data Ratio: 0.1
+MAE  : 52.19915637044368
+RMSE : 56.04072567613969
+MAPE : 155.9455777957151
+R2   : -6.379883172376476
+----------------------------------------
+
+=== VALIDATION ===
+Pooling: attention
+Kernel Size: 3
+Alpha: 0.1
+Data Ratio: 0.1
+MAE  : 29.312746483462142
+RMSE : 34.5935077959716
+MAPE : 67.74083126636413
+R2   : -1.8121027803881176
+----------------------------------------
+
+=== VALIDATION ===
+Pooling: attention
+Kernel Size: 3
+Alpha: 0.1
+Data Ratio: 0.1
+MAE  : 45.22913621281857
+RMSE : 48.55624265331895
+MAPE : 136.90942549738082
+R2   : -4.540285333850347
+----------------------------------------
+
+=== VALIDATION ===
+Pooling: attention
+Kernel Size: 3
+Alpha: 0.1
+Data Ratio: 0.1
+MAE  : 27.01714524183372
+RMSE : 32.26379526592756
+MAPE : 63.68936513303368
+R2   : -1.446092591583143
+----------------------------------------
+
+=== VALIDATION ===
+Pooling: attention
+Kernel Size: 3
+Alpha: 0.1
+Data Ratio: 0.1
+MAE  : 55.47485913600633
+RMSE : 58.62588155142368
+MAPE : 174.4467028202991
+R2   : -7.076454643261723
+----------------------------------------
+
+=== VALIDATION ===
+Pooling: attention
+Kernel Size: 3
+Alpha: 0.1
+Data Ratio: 0.1
+MAE  : 72.80385448483123
+RMSE : 75.54375033692759
+MAPE : 241.35907085625985
+R2   : -12.410317764275753
+----------------------------------------
+
+=== VALIDATION ===
+Pooling: attention
+Kernel Size: 3
+Alpha: 0.1
+Data Ratio: 0.1
+MAE  : 44.40501134928579
+RMSE : 48.553975460923766
+MAPE : 122.90294424234082
+R2   : -4.539767970939112
+----------------------------------------
+
+=== TRAIN ===
+Pooling: attention
+Kernel Size: 3
+Alpha: 0.1
+Data Ratio: 0.1
+MAE  : 19.591740947093257
+RMSE : 23.124621493666613
+MAPE : 54.56704057617099
+R2   : -0.25419750899567584
+----------------------------------------
+
+=== VALIDATION ===
+Pooling: attention
+Kernel Size: 3
+Alpha: 0.1
+Data Ratio: 0.1
+MAE  : 17.700046310182024
+RMSE : 21.63909539157764
+MAPE : 50.494237777802844
+R2   : -0.10032299432121183
+----------------------------------------
+
+=== TEST ===
+Pooling: attention
+Kernel Size: 3
+Alpha: 0.1
+Data Ratio: 0.1
+MAE  : 18.810394883155823
+RMSE : 22.879792765659523
+MAPE : 49.6767118485201
+R2   : -0.1641362249525946
+----------------------------------------
+
+=== VALIDATION ===
+Pooling: attention
+Kernel Size: 3
+Alpha: 0.1
+Data Ratio: 1.0
+MAE  : 56.65316310763994
+RMSE : 59.79555010901888
+MAPE : 148.24003171962065
+R2   : -7.61285917274682
+----------------------------------------
+
+=== VALIDATION ===
+Pooling: attention
+Kernel Size: 3
+Alpha: 0.1
+Data Ratio: 1.0
+MAE  : 26.894976821742933
+RMSE : 31.478864988664967
+MAPE : 60.8423739590071
+R2   : -1.3869743088163373
+----------------------------------------
+
+=== VALIDATION ===
+Pooling: attention
+Kernel Size: 3
+Alpha: 0.1
+Data Ratio: 1.0
+MAE  : 49.841864734700906
+RMSE : 53.067444816118616
+MAPE : 129.70001984666146
+R2   : -5.783689615745945
+----------------------------------------
+
+=== VALIDATION ===
+Pooling: attention
+Kernel Size: 3
+Alpha: 0.1
+Data Ratio: 1.0
+MAE  : 37.56512115524611
+RMSE : 41.663908979717675
+MAPE : 87.23283093948791
+R2   : -3.181476326972337
+----------------------------------------
+
+=== VALIDATION ===
+Pooling: attention
+Kernel Size: 3
+Alpha: 0.1
+Data Ratio: 1.0
+MAE  : 18.62239530369117
+RMSE : 21.502230595666152
+MAPE : 59.41165255319616
+R2   : -0.11372160587326441
+----------------------------------------
+
+=== VALIDATION ===
+Pooling: attention
+Kernel Size: 3
+Alpha: 0.1
+Data Ratio: 1.0
+MAE  : 19.459086842184007
+RMSE : 22.324379377913036
+MAPE : 50.01479228560811
+R2   : -0.20051724622712164
+----------------------------------------
+
+=== VALIDATION ===
+Pooling: attention
+Kernel Size: 3
+Alpha: 0.1
+Data Ratio: 1.0
+MAE  : 34.99455890417459
+RMSE : 37.05314478161192
+MAPE : 98.34339411715048
+R2   : -2.307194687527199
+----------------------------------------
+
+=== VALIDATION ===
+Pooling: attention
+Kernel Size: 3
+Alpha: 0.1
+Data Ratio: 1.0
+MAE  : 9.171863277516273
+RMSE : 12.08836300803478
+MAPE : 19.9870843823185
+R2   : 0.6479984294243446
+----------------------------------------
+
+=== VALIDATION ===
+Pooling: attention
+Kernel Size: 3
+Alpha: 0.1
+Data Ratio: 1.0
+MAE  : 12.170596975885596
+RMSE : 14.011217149943104
+MAPE : 40.605263333298225
+R2   : 0.5271086797762032
+----------------------------------------
+
+=== VALIDATION ===
+Pooling: attention
+Kernel Size: 3
+Alpha: 0.1
+Data Ratio: 1.0
+MAE  : 18.738808318402793
+RMSE : 22.304523772025952
+MAPE : 39.88318116773448
+R2   : -0.19838268325235764
+----------------------------------------
+
+=== VALIDATION ===
+Pooling: attention
+Kernel Size: 3
+Alpha: 0.1
+Data Ratio: 1.0
+MAE  : 12.63459857376915
+RMSE : 15.383365879254875
+MAPE : 30.65470496442187
+R2   : 0.4299507826103579
+----------------------------------------
+
+=== VALIDATION ===
+Pooling: attention
+Kernel Size: 3
+Alpha: 0.1
+Data Ratio: 1.0
+MAE  : 13.100316782541272
+RMSE : 16.111759246726578
+MAPE : 32.53072258395557
+R2   : 0.374689757683077
+----------------------------------------
+
+=== VALIDATION ===
+Pooling: attention
+Kernel Size: 3
+Alpha: 0.1
+Data Ratio: 1.0
+MAE  : 7.7821749785678245
+RMSE : 9.253784115728239
+MAPE : 29.29133403595823
+R2   : 0.7937241706800182
+----------------------------------------
+
+=== VALIDATION ===
+Pooling: attention
+Kernel Size: 3
+Alpha: 0.1
+Data Ratio: 1.0
+MAE  : 14.999400833242696
+RMSE : 17.52211872539493
+MAPE : 45.90039823719228
+R2   : 0.2604239271307761
+----------------------------------------
+
+=== VALIDATION ===
+Pooling: attention
+Kernel Size: 3
+Alpha: 0.1
+Data Ratio: 1.0
+MAE  : 5.36645892481611
+RMSE : 7.041593367633378
+MAPE : 14.505310951195838
+R2   : 0.8805595312365225
+----------------------------------------
+
+=== VALIDATION ===
+Pooling: attention
+Kernel Size: 3
+Alpha: 0.1
+Data Ratio: 1.0
+MAE  : 4.721165150373177
+RMSE : 6.1414376649664515
+MAPE : 14.461300575496377
+R2   : 0.9091448162276661
+----------------------------------------
+
+=== VALIDATION ===
+Pooling: attention
+Kernel Size: 3
+Alpha: 0.1
+Data Ratio: 1.0
+MAE  : 10.681929474368234
+RMSE : 12.628685385497047
+MAPE : 44.93173640328065
+R2   : 0.6158278282283892
+----------------------------------------
+
+=== VALIDATION ===
+Pooling: attention
+Kernel Size: 3
+Alpha: 0.1
+Data Ratio: 1.0
+MAE  : 12.696732275796265
+RMSE : 16.309650368474664
+MAPE : 26.53504757247357
+R2   : 0.35923480006980646
+----------------------------------------
+
+=== VALIDATION ===
+Pooling: attention
+Kernel Size: 3
+Alpha: 0.1
+Data Ratio: 1.0
+MAE  : 4.762888413391429
+RMSE : 6.263158206165177
+MAPE : 15.699858085717228
+R2   : 0.9055077089617808
+----------------------------------------
+
+=== VALIDATION ===
+Pooling: attention
+Kernel Size: 3
+Alpha: 0.1
+Data Ratio: 1.0
+MAE  : 3.612659891493816
+RMSE : 5.020275860120857
+MAPE : 11.346640157036756
+R2   : 0.9392893645332617
+----------------------------------------
+
+=== VALIDATION ===
+Pooling: attention
+Kernel Size: 3
+Alpha: 0.1
+Data Ratio: 1.0
+MAE  : 6.072246073728829
+RMSE : 7.657186692000669
+MAPE : 22.19028400148578
+R2   : 0.8587631292968185
+----------------------------------------
+
+=== VALIDATION ===
+Pooling: attention
+Kernel Size: 3
+Alpha: 0.1
+Data Ratio: 1.0
+MAE  : 10.746348507425745
+RMSE : 12.710167318138478
+MAPE : 27.342521703047858
+R2   : 0.6108543767745613
+----------------------------------------
+
+=== VALIDATION ===
+Pooling: attention
+Kernel Size: 3
+Alpha: 0.1
+Data Ratio: 1.0
+MAE  : 5.188972944257673
+RMSE : 6.492520513394463
+MAPE : 17.91320592016495
+R2   : 0.8984602065113946
+----------------------------------------
+
+=== VALIDATION ===
+Pooling: attention
+Kernel Size: 3
+Alpha: 0.1
+Data Ratio: 1.0
+MAE  : 7.022229974547917
+RMSE : 8.410949681511424
+MAPE : 32.448336374285006
+R2   : 0.8295881918720596
+----------------------------------------
+
+=== VALIDATION ===
+Pooling: attention
+Kernel Size: 3
+Alpha: 0.1
+Data Ratio: 1.0
+MAE  : 11.003605365942711
+RMSE : 13.091448154226503
+MAPE : 28.14253973432595
+R2   : 0.5871569335878166
+----------------------------------------
+
+=== VALIDATION ===
+Pooling: attention
+Kernel Size: 3
+Alpha: 0.1
+Data Ratio: 1.0
+MAE  : 8.391322225310937
+RMSE : 10.011948111839924
+MAPE : 20.260032276216876
+R2   : 0.7585391110553279
+----------------------------------------
+
+=== VALIDATION ===
+Pooling: attention
+Kernel Size: 3
+Alpha: 0.1
+Data Ratio: 1.0
+MAE  : 7.628608474804228
+RMSE : 9.520776699394332
+MAPE : 27.59629401269382
+R2   : 0.7816494081222486
+----------------------------------------
+
+=== VALIDATION ===
+Pooling: attention
+Kernel Size: 3
+Alpha: 0.1
+Data Ratio: 1.0
+MAE  : 10.582597234137477
+RMSE : 11.575752954996252
+MAPE : 34.253153756059966
+R2   : 0.6772188874270446
+----------------------------------------
+
+=== VALIDATION ===
+Pooling: attention
+Kernel Size: 3
+Alpha: 0.1
+Data Ratio: 1.0
+MAE  : 4.957077011052599
+RMSE : 6.4239923638969385
+MAPE : 16.978819667869598
+R2   : 0.900592386684614
+----------------------------------------
+
+=== VALIDATION ===
+Pooling: attention
+Kernel Size: 3
+Alpha: 0.1
+Data Ratio: 1.0
+MAE  : 8.350947744356011
+RMSE : 10.01444134030723
+MAPE : 32.828345018217505
+R2   : 0.7584188363367445
+----------------------------------------
+
+=== VALIDATION ===
+Pooling: attention
+Kernel Size: 3
+Alpha: 0.1
+Data Ratio: 1.0
+MAE  : 5.440248832517649
+RMSE : 6.965617629302983
+MAPE : 12.654106686298054
+R2   : 0.8831230483129315
+----------------------------------------
+
+=== VALIDATION ===
+Pooling: attention
+Kernel Size: 3
+Alpha: 0.1
+Data Ratio: 1.0
+MAE  : 6.595534017975147
+RMSE : 7.855442444616146
+MAPE : 22.24339358112363
+R2   : 0.8513547907179959
+----------------------------------------
+
+=== VALIDATION ===
+Pooling: attention
+Kernel Size: 3
+Alpha: 0.1
+Data Ratio: 1.0
+MAE  : 3.8956454330336374
+RMSE : 4.93388548382472
+MAPE : 14.156051634129188
+R2   : 0.9413608393427471
+----------------------------------------
+
+=== VALIDATION ===
+Pooling: attention
+Kernel Size: 3
+Alpha: 0.1
+Data Ratio: 1.0
+MAE  : 7.2517996346100455
+RMSE : 8.74580235837026
+MAPE : 20.801539847262738
+R2   : 0.8157493908629928
+----------------------------------------
+
+=== VALIDATION ===
+Pooling: attention
+Kernel Size: 3
+Alpha: 0.1
+Data Ratio: 1.0
+MAE  : 15.526193014833751
+RMSE : 16.32862188773721
+MAPE : 47.06834292768149
+R2   : 0.35774324639376287
+----------------------------------------
+
+=== VALIDATION ===
+Pooling: attention
+Kernel Size: 3
+Alpha: 0.1
+Data Ratio: 1.0
+MAE  : 8.098020771025702
+RMSE : 9.718722699777352
+MAPE : 17.67507889188937
+R2   : 0.7724755902549179
+----------------------------------------
+
+=== VALIDATION ===
+Pooling: attention
+Kernel Size: 3
+Alpha: 0.1
+Data Ratio: 1.0
+MAE  : 7.347584211539176
+RMSE : 8.765775592476881
+MAPE : 30.733480548485325
+R2   : 0.8149068649075073
+----------------------------------------
+
+=== VALIDATION ===
+Pooling: attention
+Kernel Size: 3
+Alpha: 0.1
+Data Ratio: 1.0
+MAE  : 2.9914208870167593
+RMSE : 4.229039152696527
+MAPE : 8.814608535205371
+R2   : 0.9569182807111071
+----------------------------------------
+
+=== VALIDATION ===
+Pooling: attention
+Kernel Size: 3
+Alpha: 0.1
+Data Ratio: 1.0
+MAE  : 8.07232887728414
+RMSE : 10.135410421069125
+MAPE : 18.403033664959214
+R2   : 0.7525472445975165
+----------------------------------------
+
+=== VALIDATION ===
+Pooling: attention
+Kernel Size: 3
+Alpha: 0.1
+Data Ratio: 1.0
+MAE  : 7.310240723027439
+RMSE : 8.681367083536514
+MAPE : 33.95856958555747
+R2   : 0.8184543465442058
+----------------------------------------
+
+=== VALIDATION ===
+Pooling: attention
+Kernel Size: 3
+Alpha: 0.1
+Data Ratio: 1.0
+MAE  : 5.614190264701161
+RMSE : 6.9345996664896425
+MAPE : 27.350854380157063
+R2   : 0.8841616391225848
+----------------------------------------
+
+=== VALIDATION ===
+Pooling: attention
+Kernel Size: 3
+Alpha: 0.1
+Data Ratio: 1.0
+MAE  : 3.5118702937692574
+RMSE : 4.640806086376758
+MAPE : 10.08463053655125
+R2   : 0.9481204191163531
+----------------------------------------
+
+=== VALIDATION ===
+Pooling: attention
+Kernel Size: 3
+Alpha: 0.1
+Data Ratio: 1.0
+MAE  : 7.352318920745352
+RMSE : 8.642729055935279
+MAPE : 16.690112538384394
+R2   : 0.8200667553021963
+----------------------------------------
+
+=== VALIDATION ===
+Pooling: attention
+Kernel Size: 3
+Alpha: 0.1
+Data Ratio: 1.0
+MAE  : 8.951883755765854
+RMSE : 9.540098006778862
+MAPE : 28.462868749098728
+R2   : 0.780762274679801
+----------------------------------------
+
+=== VALIDATION ===
+Pooling: attention
+Kernel Size: 3
+Alpha: 0.1
+Data Ratio: 1.0
+MAE  : 3.6120429267583076
+RMSE : 4.574096684607161
+MAPE : 16.65487622614951
+R2   : 0.9496011884718278
+----------------------------------------
+
+=== VALIDATION ===
+Pooling: attention
+Kernel Size: 3
+Alpha: 0.1
+Data Ratio: 1.0
+MAE  : 4.425147973711175
+RMSE : 5.435636037304388
+MAPE : 11.92046701322261
+R2   : 0.9288278060779023
+----------------------------------------
+
+=== VALIDATION ===
+Pooling: attention
+Kernel Size: 3
+Alpha: 0.1
+Data Ratio: 1.0
+MAE  : 2.817322919114575
+RMSE : 3.8439382753056615
+MAPE : 8.557087910249514
+R2   : 0.9644071777744326
+----------------------------------------
+
+=== VALIDATION ===
+Pooling: attention
+Kernel Size: 3
+Alpha: 0.1
+Data Ratio: 1.0
+MAE  : 3.1880585031883166
+RMSE : 4.386362622021238
+MAPE : 14.911541876991722
+R2   : 0.9536533146952362
+----------------------------------------
+
+=== VALIDATION ===
+Pooling: attention
+Kernel Size: 3
+Alpha: 0.1
+Data Ratio: 1.0
+MAE  : 5.259859924201168
+RMSE : 6.363755848046173
+MAPE : 14.228353772338675
+R2   : 0.9024478976926561
+----------------------------------------
+
+=== VALIDATION ===
+Pooling: attention
+Kernel Size: 3
+Alpha: 0.1
+Data Ratio: 1.0
+MAE  : 4.670537232006948
+RMSE : 5.624284894944865
+MAPE : 14.95126875649225
+R2   : 0.92380188323923
+----------------------------------------
+
+=== TRAIN ===
+Pooling: attention
+Kernel Size: 3
+Alpha: 0.1
+Data Ratio: 1.0
+MAE  : 3.080909294275527
+RMSE : 6.817174377204914
+MAPE : 7.894457966931463
+R2   : 0.892999126159278
+----------------------------------------
+
+=== VALIDATION ===
+Pooling: attention
+Kernel Size: 3
+Alpha: 0.1
+Data Ratio: 1.0
+MAE  : 2.8070447838205026
+RMSE : 3.832147009682666
+MAPE : 8.487938679314192
+R2   : 0.9646252045485177
+----------------------------------------
+
+=== TEST ===
+Pooling: attention
+Kernel Size: 3
+Alpha: 0.1
+Data Ratio: 1.0
+MAE  : 3.2986788577443744
+RMSE : 4.412737511886145
+MAPE : 8.45385392033864
+R2   : 0.9525077710676526
+----------------------------------------
