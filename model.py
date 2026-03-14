@@ -6,6 +6,27 @@ model.py - COMPLETE WITH DUAL-TASK MTL
 ✅ Updated weather features: 8 features (all weather columns)
 ✅ All datasets updated to handle binary flags
 ✅ NEW: Dual-Task MTL (Local segments + Global stations)
+✅ NEW: mask_type='hard'|'soft' threaded through GAT and all model classes
+
+Masking modes
+─────────────
+  'hard' (default)
+      GraphAttentionLayer : non-edges are blocked with -9e15 before softmax,
+                            exactly as before.
+      global_attention    : key_padding_mask=~mask blocks padding tokens.
+      DualTaskMTLHead     : same key_padding_mask + zero-weight pooling.
+
+  'soft'
+      GraphAttentionLayer : a single learnable scalar (soft_adj_scale, init=1)
+                            multiplies the adjacency matrix and is ADDED to the
+                            raw attention logits e before softmax.  Non-edges
+                            have adj=0 so they receive no structural bonus;
+                            edges receive adj_value * scale.  No token is
+                            hard-blocked — gradients flow everywhere.
+      global_attention    : no key_padding_mask; SoftMaskGate in DualTaskMTLHead
+                            handles suppression of padding positions.
+      DualTaskMTLHead     : SoftMaskGate scales input before attention and is
+                            used for soft weighted pooling.
 
 All neural network components including Multi-Task Learning
 """
@@ -26,7 +47,8 @@ from torch.utils.data import Dataset, DataLoader
 import torch.optim as optim
 
 from config import Config, DEVICE, print_section, haversine_meters
-from mtl import MTLHead, MTLLoss
+from mtl import (MTLHead, MTLLoss,
+                 DualTaskMTLHead, DualTaskMTLLoss, SoftMaskGate)
 
 warnings.filterwarnings('ignore')
 
@@ -401,8 +423,28 @@ class PathDataset(Dataset):
 # =============================================================================
 
 class GraphAttentionLayer(nn.Module):
-    def __init__(self, in_features, out_features, dropout=0.3, alpha=0.2):
+    """
+    Single GAT attention head.
+
+    mask_type : 'hard' (default) | 'soft'
+        hard — non-edges are zeroed with -9e15 before softmax.  Only
+               structurally connected nodes can exchange information.
+        soft — a learnable scalar (soft_adj_scale, initialised to 1.0)
+               multiplies the adjacency matrix and is ADDED to the raw
+               attention logit e before softmax.  Non-edges (adj=0) get
+               no structural bonus; edges with adj>0 get adj_val * scale
+               added.  No node is hard-blocked — gradients flow through
+               every pair, and the model decides how much to trust the
+               graph structure via soft_adj_scale.
+    """
+
+    def __init__(self, in_features, out_features, dropout=0.3, alpha=0.2,
+                 mask_type: str = 'hard'):
         super().__init__()
+        assert mask_type in ('hard', 'soft'), \
+            f"mask_type must be 'hard' or 'soft', got '{mask_type}'"
+        self.mask_type = mask_type
+
         self.W = nn.Parameter(torch.empty(size=(in_features, out_features)))
         nn.init.xavier_uniform_(self.W.data, gain=1.414)
         self.a = nn.Parameter(torch.empty(size=(2 * out_features, 1)))
@@ -410,18 +452,40 @@ class GraphAttentionLayer(nn.Module):
         self.leakyrelu = nn.LeakyReLU(alpha)
         self.dropout = dropout
 
+        if mask_type == 'soft':
+            # Learnable scalar that scales adjacency values added to logits.
+            # Initialised to 1.0 — at epoch 0 each edge gets adj_val added to e,
+            # giving edges with higher adjacency weight more initial attention.
+            self.soft_adj_scale = nn.Parameter(torch.ones(1))
+
     def forward(self, h, adj):
         batch_size, num_nodes, _ = h.size()
         if not isinstance(adj, torch.Tensor):
             adj = torch.FloatTensor(adj)
         adj = adj.to(h.device)
-        Wh = torch.matmul(h, self.W)
-        Wh_i = Wh.unsqueeze(2).repeat(1, 1, num_nodes, 1)
-        Wh_j = Wh.unsqueeze(1).repeat(1, num_nodes, 1, 1)
-        a_input = torch.cat([Wh_i, Wh_j], dim=3)
-        e = self.leakyrelu(torch.matmul(a_input, self.a).squeeze(3))
-        zero_vec = -9e15 * torch.ones_like(e)
-        attention = torch.where(adj.unsqueeze(0) > 0, e, zero_vec)
+
+        Wh = torch.matmul(h, self.W)                                     # [B, N, out]
+        Wh_i = Wh.unsqueeze(2).repeat(1, 1, num_nodes, 1)               # [B, N, N, out]
+        Wh_j = Wh.unsqueeze(1).repeat(1, num_nodes, 1, 1)               # [B, N, N, out]
+        a_input = torch.cat([Wh_i, Wh_j], dim=3)                        # [B, N, N, 2*out]
+        e = self.leakyrelu(torch.matmul(a_input, self.a).squeeze(3))    # [B, N, N]
+
+        if self.mask_type == 'hard':
+            # Hard masking: non-edges are effectively -inf before softmax
+            zero_vec = -9e15 * torch.ones_like(e)
+            attention = torch.where(adj.unsqueeze(0) > 0, e, zero_vec)
+
+        else:  # soft masking
+            # Soft masking: adjacency values act as a continuous additive
+            # bias on the attention logits.
+            #   edges    (adj > 0): logit boosted by adj_val * soft_adj_scale
+            #   non-edges (adj = 0): no boost — suppressed by the distribution
+            #                        of other edges but NOT hard-blocked
+            # The model can learn to increase/decrease soft_adj_scale to tune
+            # how much the graph structure guides attention.
+            soft_bias = self.soft_adj_scale * adj.float().unsqueeze(0)  # [1, N, N]
+            attention = e + soft_bias                                    # [B, N, N]
+
         attention = F.softmax(attention, dim=2)
         attention = F.dropout(attention, self.dropout, training=self.training)
         h_prime = torch.matmul(attention, Wh)
@@ -429,10 +493,17 @@ class GraphAttentionLayer(nn.Module):
 
 
 class MultiRelationalGAT(nn.Module):
-    def __init__(self, n_heads, in_features, out_per_head, dropout=0.3):
+    """Multi-head, multi-relational GAT.
+
+    mask_type is forwarded to every GraphAttentionLayer head.
+    """
+
+    def __init__(self, n_heads, in_features, out_per_head, dropout=0.3,
+                 mask_type: str = 'hard'):
         super().__init__()
         self.gat_heads = nn.ModuleList([
-            GraphAttentionLayer(in_features, out_per_head, dropout)
+            GraphAttentionLayer(in_features, out_per_head, dropout,
+                                mask_type=mask_type)
             for _ in range(n_heads)
         ])
         self.out_proj = nn.Linear(out_per_head * n_heads, out_per_head)
@@ -457,12 +528,22 @@ class HistoricalEmbedding(nn.Module):
 
 
 class MAGTTE(nn.Module):
+    """MAGNN base model.
+
+    mask_type : 'hard' | 'soft'  — forwarded to MultiRelationalGAT.
+    """
+
     def __init__(self, num_nodes, n_heads=3, node_embed_dim=32,
-                 gat_hidden=32, lstm_hidden=64, historical_dim=16, dropout=0.3):
+                 gat_hidden=32, lstm_hidden=64, historical_dim=16, dropout=0.3,
+                 mask_type: str = 'hard'):
         super().__init__()
         self.node_embedding = nn.Embedding(num_nodes, node_embed_dim)
         nn.init.normal_(self.node_embedding.weight, mean=0, std=0.1)
-        self.multi_gat = MultiRelationalGAT(n_heads, node_embed_dim, gat_hidden, dropout)
+
+        self.multi_gat = MultiRelationalGAT(
+            n_heads, node_embed_dim, gat_hidden, dropout,
+            mask_type=mask_type
+        )
         self.historical_embed = HistoricalEmbedding(num_nodes, historical_dim)
 
         fusion_in = gat_hidden + historical_dim + 5
@@ -491,6 +572,8 @@ class MAGTTE(nn.Module):
         self.register_buffer('adj_geo', None)
         self.register_buffer('adj_dist', None)
         self.register_buffer('adj_soc', None)
+
+        print(f"   MAGTTE  mask_type='{mask_type}'")
 
     def set_adjacency_matrices(self, adj_geo, adj_dist, adj_soc):
         self.register_buffer('adj_geo', torch.FloatTensor(adj_geo))
@@ -701,90 +784,40 @@ class MAGNN_LSTM_MTL(nn.Module):
 
 
 # =============================================================================
-# NEW: DUAL-TASK MTL MODEL
+# DUAL-TASK MTL MODEL
 # =============================================================================
-
-class DualTaskMTLHead(nn.Module):
-    """
-    Dual-Task MTL: Local segments + Global station-to-station
-    """
-
-    def __init__(self, feature_dim, local_hidden=64, global_hidden=128, dropout=0.2):
-        super().__init__()
-
-        # Local task: Individual segment prediction
-        self.local_head = nn.Sequential(
-            nn.Linear(feature_dim, local_hidden),
-            nn.ReLU(),
-            nn.Dropout(dropout),
-            nn.Linear(local_hidden, 32),
-            nn.ReLU(),
-            nn.Dropout(dropout),
-            nn.Linear(32, 1)
-        )
-
-        # Global task: Station-to-station aggregate
-        self.global_attention = nn.MultiheadAttention(
-            embed_dim=feature_dim,
-            num_heads=4,
-            dropout=dropout,
-            batch_first=True
-        )
-
-        self.global_head = nn.Sequential(
-            nn.Linear(feature_dim, global_hidden),
-            nn.ReLU(),
-            nn.Dropout(dropout),
-            nn.Linear(global_hidden, 64),
-            nn.ReLU(),
-            nn.Dropout(dropout),
-            nn.Linear(64, 1)
-        )
-
-        # Task weighting (learnable)
-        self.log_var_local = nn.Parameter(torch.zeros(1))
-        self.log_var_global = nn.Parameter(torch.zeros(1))
-
-    def forward(self, x, mask=None):
-        """
-        Args:
-            x: [batch, seq_len, feature_dim] - sequence of segment embeddings
-            mask: [batch, seq_len] - padding mask
-        Returns:
-            local_preds: [batch, seq_len, 1] - per-segment predictions
-            global_pred: [batch, 1] - aggregated prediction
-        """
-        # Local task: Predict each segment independently
-        local_preds = self.local_head(x)  # [batch, seq_len, 1]
-
-        # Global task: Attend over sequence and predict aggregate
-        attn_out, _ = self.global_attention(x, x, x, key_padding_mask=~mask if mask is not None else None)
-
-        # Global pooling (mean over valid segments)
-        if mask is not None:
-            mask_expanded = mask.unsqueeze(-1).float()
-            global_repr = (attn_out * mask_expanded).sum(dim=1) / mask_expanded.sum(dim=1).clamp(min=1)
-        else:
-            global_repr = attn_out.mean(dim=1)
-
-        global_pred = self.global_head(global_repr)  # [batch, 1]
-
-        return local_preds, global_pred
-
 
 class MAGNN_LSTM_DualTaskMTL(nn.Module):
     """
-    ✅ IMPROVED MTL: Local segments + Global stations
+    MAGNN-LSTM with Dual-Task MTL (Local segments + Global stations).
 
-    Dual-task learning:
-    - Local: Predict individual segment durations
-    - Global: Predict total journey time
+    mask_type : 'hard' | 'soft'
+        Controls masking at TWO points in the forward pass:
+
+        1. inner global_attention (nn.MultiheadAttention between LSTM and MTL head)
+              hard → key_padding_mask=~mask blocks padding positions entirely
+              soft → no key_padding_mask; SoftMaskGate in DualTaskMTLHead
+                     handles suppression via learned continuous weights
+
+        2. DualTaskMTLHead  (imported from mtl.py)
+              hard → existing binary key_padding_mask + zero-weight pooling
+              soft → SoftMaskGate scales attention input + soft weighted pooling
+
+        Note: the GAT mask_type is set on the MAGTTE base model at construction
+        time (in the training function) and is independent of this parameter.
+        Pass matching mask_type values to both MAGTTE and this class for a
+        fully consistent masking regime across the entire architecture.
     """
 
     def __init__(self, magnn_model, spatial_dim, operational_dim, weather_dim,
                  temporal_dim=5, lstm_hidden=64, lstm_layers=1, dropout=0.2,
-                 local_hidden=64, global_hidden=128, freeze_magnn=True):
+                 local_hidden=64, global_hidden=128, freeze_magnn=True,
+                 mask_type: str = 'hard'):
         super().__init__()
+
+        assert mask_type in ('hard', 'soft'), \
+            f"mask_type must be 'hard' or 'soft', got '{mask_type}'"
+        self.mask_type = mask_type
 
         self.magnn = magnn_model
         self.freeze_magnn = freeze_magnn
@@ -794,7 +827,7 @@ class MAGNN_LSTM_DualTaskMTL(nn.Module):
             for param in self.magnn.parameters():
                 param.requires_grad = False
 
-        # LSTM for temporal modeling
+        # LSTM for temporal modelling
         self.lstm = nn.LSTM(
             input_size=self.lstm_input_dim,
             hidden_size=lstm_hidden,
@@ -803,7 +836,7 @@ class MAGNN_LSTM_DualTaskMTL(nn.Module):
             dropout=0.0
         )
 
-        # Global temporal attention
+        # Inner global temporal attention (between LSTM output and MTL head)
         self.global_attention = nn.MultiheadAttention(
             embed_dim=lstm_hidden,
             num_heads=4,
@@ -811,13 +844,16 @@ class MAGNN_LSTM_DualTaskMTL(nn.Module):
             batch_first=True
         )
 
-        # Dual-task MTL head
+        # Dual-task MTL head (imported from mtl.py — carries its own mask_type)
         self.mtl_head = DualTaskMTLHead(
             feature_dim=lstm_hidden,
             local_hidden=local_hidden,
             global_hidden=global_hidden,
-            dropout=dropout
+            dropout=dropout,
+            mask_type=mask_type
         )
+
+        print(f"   MAGNN_LSTM_DualTaskMTL  mask_type='{mask_type}'")
 
     def get_magnn_embeddings(self, seg_indices):
         all_nodes = self.magnn.node_embedding.weight.unsqueeze(0)
@@ -833,53 +869,59 @@ class MAGNN_LSTM_DualTaskMTL(nn.Module):
                 weather_features, mask=None, return_local=False):
         """
         Returns:
-            local_preds: [batch, seq_len, 1] if return_local=True
-            global_pred: [batch, 1] always returned
+            (local_preds [B, L, 1], global_pred [B, 1])  if return_local=True
+            global_pred [B, 1]                           otherwise
         """
-        batch_size = temporal_features.size(0)
-
-        # Handle both 2D and 3D inputs
+        # ── Handle 2-D single-segment inputs ─────────────────────────────────
         if len(temporal_features.shape) == 2:
-            # Single segment: [batch, features] -> [batch, 1, features]
-            temporal_features = temporal_features.unsqueeze(1)
+            temporal_features    = temporal_features.unsqueeze(1)
             operational_features = operational_features.unsqueeze(1)
-            weather_features = weather_features.unsqueeze(1)
-            seg_indices = seg_indices.unsqueeze(1) if len(seg_indices.shape) == 1 else seg_indices
-            if mask is not None:
-                mask = mask.unsqueeze(1) if len(mask.shape) == 1 else mask
+            weather_features     = weather_features.unsqueeze(1)
+            if len(seg_indices.shape) == 1:
+                seg_indices = seg_indices.unsqueeze(1)
+            if mask is not None and len(mask.shape) == 1:
+                mask = mask.unsqueeze(1)
 
         seq_len = temporal_features.size(1)
 
-        # Get spatial embeddings
+        # ── Spatial embeddings from frozen/unfrozen MAGNN ────────────────────
         if self.freeze_magnn:
             with torch.no_grad():
                 spatial_embeddings = self.get_magnn_embeddings(seg_indices)
         else:
             spatial_embeddings = self.get_magnn_embeddings(seg_indices)
 
-        # Combine all features
+        # ── Combine all features into a sequence ─────────────────────────────
         combined_sequence = []
         for t in range(seq_len):
+            sp = (spatial_embeddings[:, t, :]
+                  if spatial_embeddings.dim() > 2
+                  else spatial_embeddings)
             combined = torch.cat([
-                spatial_embeddings[:, t, :] if spatial_embeddings.dim() > 2 else spatial_embeddings,
+                sp,
                 operational_features[:, t, :],
                 weather_features[:, t, :],
                 temporal_features[:, t, :]
             ], dim=1)
             combined_sequence.append(combined)
 
-        combined_sequence = torch.stack(combined_sequence, dim=1)
+        combined_sequence = torch.stack(combined_sequence, dim=1)  # [B, L, D]
 
-        # LSTM encoding
-        lstm_out, _ = self.lstm(combined_sequence)
+        # ── LSTM encoding ─────────────────────────────────────────────────────
+        lstm_out, _ = self.lstm(combined_sequence)                 # [B, L, H]
 
-        # Global attention
-        attn_out, _ = self.global_attention(
-            lstm_out, lstm_out, lstm_out,
-            key_padding_mask=~mask if mask is not None else None
-        )
+        # ── Inner global attention ────────────────────────────────────────────
+        # hard : padding tokens are hard-blocked via key_padding_mask
+        # soft : no blocking — DualTaskMTLHead's SoftMaskGate handles it
+        if self.mask_type == 'hard':
+            attn_out, _ = self.global_attention(
+                lstm_out, lstm_out, lstm_out,
+                key_padding_mask=~mask if mask is not None else None
+            )
+        else:
+            attn_out, _ = self.global_attention(lstm_out, lstm_out, lstm_out)
 
-        # Dual-task predictions
+        # ── Dual-task MTL head ────────────────────────────────────────────────
         local_preds, global_pred = self.mtl_head(attn_out, mask)
 
         if return_local:
@@ -1069,13 +1111,16 @@ def evaluate(model, dataloader, criterion, device, scaler):
 def train_magtte(train_loader, val_loader, test_loader,
                  adj_geo, adj_dist, adj_soc,
                  segment_types, scaler,
-                 output_folder, device, cfg):
+                 output_folder, device, cfg,
+                 mask_type: str = 'hard'):
     print_section("MAGTTE + GAT TRAINING")
     num_segments = len(segment_types)
     print(f"   Segments: {num_segments}, Epochs: {cfg.n_epochs}, Device: {device}")
+    print(f"   GAT mask_type: '{mask_type}'")
 
     model = MAGTTE(num_segments, cfg.n_heads, cfg.node_embed_dim, cfg.gat_hidden,
-                   cfg.lstm_hidden, cfg.historical_dim, cfg.dropout).to(device)
+                   cfg.lstm_hidden, cfg.historical_dim, cfg.dropout,
+                   mask_type=mask_type).to(device)
     model.set_adjacency_matrices(adj_geo, adj_dist, adj_soc)
 
     optimizer = optim.Adam(model.parameters(), lr=cfg.learning_rate, weight_decay=cfg.weight_decay)
@@ -1139,12 +1184,15 @@ def train_magnn_lstm(train_loader, val_loader, test_loader,
                      segment_types, scaler,
                      output_folder, device, cfg,
                      pretrained_magnn_path=None,
-                     freeze_magnn=True):
+                     freeze_magnn=True,
+                     mask_type: str = 'hard'):
     print_section("MAGNN-LSTM TRAINING")
     num_segments = len(segment_types)
+    print(f"   GAT mask_type: '{mask_type}'")
 
     magnn_base = MAGTTE(num_segments, cfg.n_heads, cfg.node_embed_dim, cfg.gat_hidden,
-                        cfg.lstm_hidden, cfg.historical_dim, cfg.dropout).to(device)
+                        cfg.lstm_hidden, cfg.historical_dim, cfg.dropout,
+                        mask_type=mask_type).to(device)
     magnn_base.set_adjacency_matrices(adj_geo, adj_dist, adj_soc)
 
     if pretrained_magnn_path and os.path.exists(pretrained_magnn_path):
@@ -1284,13 +1332,16 @@ def train_magnn_lstm_mtl(train_loader, val_loader, test_loader,
                          segment_types, scaler,
                          output_folder, device, cfg,
                          pretrained_magnn_path=None,
-                         freeze_magnn=True):
+                         freeze_magnn=True,
+                         mask_type: str = 'hard'):
     """Train MAGNN-LSTM-MTL with REAL multi-segment paths."""
     print_section("MAGNN-LSTM-MTL TRAINING (Multi-Segment Paths)")
     num_segments = len(segment_types)
+    print(f"   GAT mask_type: '{mask_type}'")
 
     magnn_base = MAGTTE(num_segments, cfg.n_heads, cfg.node_embed_dim, cfg.gat_hidden,
-                        cfg.lstm_hidden, cfg.historical_dim, cfg.dropout).to(device)
+                        cfg.lstm_hidden, cfg.historical_dim, cfg.dropout,
+                        mask_type=mask_type).to(device)
     magnn_base.set_adjacency_matrices(adj_geo, adj_dist, adj_soc)
 
     if pretrained_magnn_path and os.path.exists(pretrained_magnn_path):
@@ -1300,14 +1351,14 @@ def train_magnn_lstm_mtl(train_loader, val_loader, test_loader,
     model = MAGNN_LSTM_MTL(
         magnn_base,
         cfg.gat_hidden,
-        4,  # operational_dim
-        8,  # weather_dim
-        5,  # temporal_dim
+        4,   # operational_dim
+        8,   # weather_dim
+        5,   # temporal_dim
         64,  # lstm_hidden
-        1,  # lstm_layers
-        0.2,  # dropout
+        1,   # lstm_layers
+        0.2, # dropout
         64,  # mtl_segment_hidden
-        128,  # mtl_path_hidden
+        128, # mtl_path_hidden
         freeze_magnn
     ).to(device)
 
@@ -1475,7 +1526,7 @@ def train_magnn_lstm_mtl(train_loader, val_loader, test_loader,
 
 
 # =============================================================================
-# NEW: DUAL-TASK MTL TRAINING FUNCTION
+# DUAL-TASK MTL TRAINING FUNCTION
 # =============================================================================
 
 def train_magnn_lstm_dualtask_mtl(train_loader, val_loader, test_loader,
@@ -1483,37 +1534,44 @@ def train_magnn_lstm_dualtask_mtl(train_loader, val_loader, test_loader,
                                    segment_types, scaler,
                                    output_folder, device, cfg,
                                    pretrained_magnn_path=None,
-                                   freeze_magnn=True):
+                                   freeze_magnn=True,
+                                   mask_type: str = 'hard'):
     """
-    Train MAGNN-LSTM with Dual-Task MTL (Local + Global)
+    Train MAGNN-LSTM with Dual-Task MTL (Local + Global).
 
-    This uses SEGMENT-level data (not paths) with dual objectives:
-    - Local: Predict each segment duration
-    - Global: Predict total journey time from start to end
+    mask_type : 'hard' | 'soft'
+        Applied consistently to:
+          • MAGTTE / GraphAttentionLayer  (adjacency masking in GAT)
+          • MAGNN_LSTM_DualTaskMTL        (inner global_attention + DualTaskMTLHead)
     """
     print_section("MAGNN-LSTM-DUALTASK-MTL TRAINING (Local + Global)")
     num_segments = len(segment_types)
+    print(f"   mask_type: '{mask_type}'  (GAT + global_attention + MTL head)")
 
+    # ── Build MAGNN base with the chosen GAT mask ─────────────────────────────
     magnn_base = MAGTTE(num_segments, cfg.n_heads, cfg.node_embed_dim, cfg.gat_hidden,
-                        cfg.lstm_hidden, cfg.historical_dim, cfg.dropout).to(device)
+                        cfg.lstm_hidden, cfg.historical_dim, cfg.dropout,
+                        mask_type=mask_type).to(device)
     magnn_base.set_adjacency_matrices(adj_geo, adj_dist, adj_soc)
 
     if pretrained_magnn_path and os.path.exists(pretrained_magnn_path):
         magnn_base.load_state_dict(torch.load(pretrained_magnn_path, map_location=device))
         print(f"   ✓ Loaded pre-trained MAGNN")
 
+    # ── Build full model with the same mask_type ──────────────────────────────
     model = MAGNN_LSTM_DualTaskMTL(
         magnn_base,
         cfg.gat_hidden,
-        4,  # operational_dim
-        8,  # weather_dim
-        5,  # temporal_dim
+        4,   # operational_dim
+        8,   # weather_dim
+        5,   # temporal_dim
         64,  # lstm_hidden
-        1,  # lstm_layers
-        0.2,  # dropout
+        1,   # lstm_layers
+        0.2, # dropout
         64,  # local_hidden
-        128,  # global_hidden
-        freeze_magnn
+        128, # global_hidden
+        freeze_magnn,
+        mask_type=mask_type
     ).to(device)
 
     n_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
@@ -1526,42 +1584,6 @@ def train_magnn_lstm_dualtask_mtl(train_loader, val_loader, test_loader,
         weight_decay=cfg.weight_decay * 5
     )
     scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='min', factor=0.5, patience=5)
-
-    # Dual-task loss with uncertainty weighting
-    class DualTaskMTLLoss(nn.Module):
-        def __init__(self, criterion=None):
-            super().__init__()
-            self.criterion = criterion if criterion is not None else nn.SmoothL1Loss(reduction='none')
-
-        def forward(self, local_preds, global_pred, segment_targets, global_target,
-                    mask, log_var_local, log_var_global):
-            # Local loss (per-segment)
-            local_loss = self.criterion(local_preds, segment_targets)
-            if mask is not None:
-                mask_expanded = mask.unsqueeze(-1).float()
-                local_loss = (local_loss * mask_expanded).sum() / mask_expanded.sum().clamp(min=1)
-            else:
-                local_loss = local_loss.mean()
-
-            # Global loss (aggregate)
-            global_loss = self.criterion(global_pred, global_target).mean()
-
-            # Uncertainty weighting (Kendall et al. 2018)
-            precision_local = torch.exp(-log_var_local)
-            precision_global = torch.exp(-log_var_global)
-
-            total_loss = (
-                precision_local * local_loss + log_var_local +
-                precision_global * global_loss + log_var_global
-            )
-
-            return total_loss, {
-                'total': total_loss.item(),
-                'local': local_loss.item(),
-                'global': global_loss.item(),
-                'weight_local': precision_local.item(),
-                'weight_global': precision_global.item()
-            }
 
     criterion = DualTaskMTLLoss(criterion=nn.SmoothL1Loss())
 
@@ -1579,23 +1601,20 @@ def train_magnn_lstm_dualtask_mtl(train_loader, val_loader, test_loader,
 
         for batch in train_loader:
             seg_idx, temporal, operational, weather, target, lengths, mask = batch
-            seg_idx = seg_idx.to(device)
-            temporal = temporal.to(device)
+            seg_idx    = seg_idx.to(device)
+            temporal   = temporal.to(device)
             operational = operational.to(device)
-            weather = weather.to(device)
-            target = target.to(device)
-            mask = mask.to(device)
+            weather    = weather.to(device)
+            target     = target.to(device)
+            mask       = mask.to(device)
 
-            # Get predictions
             local_preds, global_pred = model(
                 seg_idx, temporal, operational, weather, mask, return_local=True
             )
 
-            # Targets
             segment_targets = target.unsqueeze(1).expand(-1, local_preds.size(1), -1)
             global_target = target
 
-            # Loss
             loss, loss_dict = criterion(
                 local_preds, global_pred, segment_targets, global_target,
                 mask, model.mtl_head.log_var_local, model.mtl_head.log_var_global
@@ -1609,13 +1628,13 @@ def train_magnn_lstm_dualtask_mtl(train_loader, val_loader, test_loader,
             torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
             optimizer.step()
 
-            train_loss += loss_dict['total']
-            train_local_loss += loss_dict['local']
+            train_loss        += loss_dict['total']
+            train_local_loss  += loss_dict['local']
             train_global_loss += loss_dict['global']
             n_batches += 1
 
-        train_loss /= max(n_batches, 1)
-        train_local_loss /= max(n_batches, 1)
+        train_loss        /= max(n_batches, 1)
+        train_local_loss  /= max(n_batches, 1)
         train_global_loss /= max(n_batches, 1)
 
         # Validation
@@ -1627,12 +1646,12 @@ def train_magnn_lstm_dualtask_mtl(train_loader, val_loader, test_loader,
         with torch.no_grad():
             for batch in val_loader:
                 seg_idx, temporal, operational, weather, target, lengths, mask = batch
-                seg_idx = seg_idx.to(device)
-                temporal = temporal.to(device)
+                seg_idx    = seg_idx.to(device)
+                temporal   = temporal.to(device)
                 operational = operational.to(device)
-                weather = weather.to(device)
-                target = target.to(device)
-                mask = mask.to(device)
+                weather    = weather.to(device)
+                target     = target.to(device)
+                mask       = mask.to(device)
 
                 local_preds, global_pred = model(
                     seg_idx, temporal, operational, weather, mask, return_local=True
@@ -1688,11 +1707,11 @@ def train_magnn_lstm_dualtask_mtl(train_loader, val_loader, test_loader,
         with torch.no_grad():
             for batch in loader:
                 seg_idx, temporal, operational, weather, target, lengths, mask = batch
-                seg_idx = seg_idx.to(device)
-                temporal = temporal.to(device)
+                seg_idx    = seg_idx.to(device)
+                temporal   = temporal.to(device)
                 operational = operational.to(device)
-                weather = weather.to(device)
-                mask = mask.to(device)
+                weather    = weather.to(device)
+                mask       = mask.to(device)
 
                 pred = model(seg_idx, temporal, operational, weather, mask, return_local=False)
                 preds.append(pred.cpu().numpy())

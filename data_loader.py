@@ -1,7 +1,7 @@
 """
 data_loader.py
 ==============
-GPS data loading, interpolation, and train/val/test splitting.
+GPS data loading and train/val/test splitting.
 
 Public API:
     load_data_fixed(filepath, sample_fraction=1.0)
@@ -26,129 +26,12 @@ _known_stops_cache = {}
 # DATA LOADING AND PREPROCESSING
 # =============================================================================
 
-def _interpolate_gps_small_gaps(df: pd.DataFrame,
-                                 max_gap_seconds: float = 5.0) -> pd.DataFrame:
-    """
-    LOCAL LINEAR INTERPOLATION for missing GPS coordinates.
-
-    For each trip, if a GPS record is NaN but the gap to the nearest valid
-    neighbour is ≤ max_gap_seconds (default 5 s), fill via linear interpolation
-    on the time axis.  Larger gaps are left as NaN so HDBSCAN can ignore them.
-
-    This is applied PER TRIP so that interpolation never crosses trip
-    boundaries (which would be nonsensical).
-
-    Args:
-        df              : DataFrame with 'trip_id', 'timestamp', 'latitude',
-                          'longitude' columns.
-        max_gap_seconds : Maximum allowed gap (seconds) to interpolate.
-                          Gaps larger than this are left unfilled.
-
-    Returns:
-        DataFrame with small GPS gaps filled; 'is_gps_valid' column updated.
-    """
-    if 'timestamp' not in df.columns or 'latitude' not in df.columns:
-        return df
-
-    df = df.copy()
-
-    # Ensure timestamps are datetime
-    df['timestamp'] = pd.to_datetime(df['timestamp'], errors='coerce')
-
-    filled_count = 0
-
-    for trip_id, grp in df.groupby('trip_id', sort=False):
-        grp = grp.sort_values('timestamp').copy()
-        idxs = grp.index
-
-        # Identify rows with missing lat or lon
-        missing_lat = grp['latitude'].isna() | (grp['latitude'] == 0)
-        missing_lon = grp['longitude'].isna() | (grp['longitude'] == 0)
-        missing_gps = missing_lat | missing_lon
-
-        if not missing_gps.any():
-            continue
-
-        # Time in seconds from trip start (numeric, for interpolation)
-        t_sec = (grp['timestamp'] - grp['timestamp'].min()).dt.total_seconds()
-
-        for coord_col in ['latitude', 'longitude']:
-            col_vals = grp[coord_col].copy()
-            # Zero-valued coords treated as NaN for this pass
-            col_vals = col_vals.where(col_vals != 0, np.nan)
-
-            # Compute time-based forward/backward gap per missing point
-            col_time_indexed = col_vals.copy()
-            col_time_indexed.index = t_sec.values
-
-            # Interpolate by time (linear, limit by gap window)
-            # We use a numeric index (seconds) so the interpolation respects
-            # actual time distances, not row distances.
-            col_numeric = col_vals.copy()
-            col_numeric.index = range(len(col_numeric))
-
-            valid_mask = col_vals.notna()
-            if valid_mask.sum() < 2:
-                continue  # need at least 2 anchor points
-
-            # For each missing position, check if both its preceding and
-            # following valid points are within max_gap_seconds
-            t_arr = t_sec.values
-            v_arr = col_vals.values.copy()
-
-            for pos, (is_miss, t_pos) in enumerate(zip(missing_gps.values, t_arr)):
-                if not is_miss:
-                    continue
-                if not np.isnan(v_arr[pos]) and v_arr[pos] != 0:
-                    continue  # already has value
-
-                # Search backward for nearest valid
-                prev_v, prev_t = np.nan, np.nan
-                for back in range(pos - 1, -1, -1):
-                    if not missing_gps.values[back] and not np.isnan(v_arr[back]):
-                        prev_v, prev_t = v_arr[back], t_arr[back]
-                        break
-
-                # Search forward for nearest valid
-                next_v, next_t = np.nan, np.nan
-                for fwd in range(pos + 1, len(v_arr)):
-                    if not missing_gps.values[fwd] and not np.isnan(v_arr[fwd]):
-                        next_v, next_t = v_arr[fwd], t_arr[fwd]
-                        break
-
-                if np.isnan(prev_v) or np.isnan(next_v):
-                    continue  # can't interpolate without both anchors
-
-                gap = next_t - prev_t
-                if gap <= 0 or gap > max_gap_seconds:
-                    continue  # gap too large — leave NaN
-
-                # Linear interpolation
-                alpha = (t_pos - prev_t) / gap
-                interpolated = prev_v + alpha * (next_v - prev_v)
-                df.loc[idxs[pos], coord_col] = interpolated
-                filled_count += 1
-
-    if filled_count > 0:
-        # Recompute GPS validity flag after interpolation
-        df['is_gps_valid'] = (
-            df['latitude'].notna() & df['longitude'].notna() &
-            (df['latitude'] != 0) & (df['longitude'] != 0)
-        ).astype(int)
-        print(f"   ✓ GPS interpolation: filled {filled_count:,} coordinate values "
-              f"(gaps ≤ {max_gap_seconds}s)")
-
-    return df
-
-
-
 def load_data_fixed(filepath, sample_fraction=1.0):
     """
     Load and preprocess data with:
       - Timestamp parsing
       - Trip-level sampling (chronological order preserved)
       - GPS validity flag
-      - Local linear interpolation for small GPS gaps (≤5 s)
     """
     print_section(f"LOADING DATA: {os.path.basename(filepath)}")
 
@@ -177,15 +60,6 @@ def load_data_fixed(filepath, sample_fraction=1.0):
         (df['longitude'] != 0)
     ).astype(int)
 
-    # ── Local linear interpolation for small GPS gaps (≤5 s) ─────────────────
-    if 'trip_id' in df.columns and 'timestamp' in df.columns:
-        n_invalid_before = int((df['is_gps_valid'] == 0).sum())
-        df = _interpolate_gps_small_gaps(df, max_gap_seconds=5.0)
-        n_invalid_after = int((df['is_gps_valid'] == 0).sum())
-        net_filled = n_invalid_before - n_invalid_after
-        if net_filled > 0:
-            print(f"   GPS rows recovered via interpolation: {net_filled:,}")
-
     required_cols = {
         'travel_time_sec': np.nan,
         'distance_m': np.nan,
@@ -203,7 +77,6 @@ def load_data_fixed(filepath, sample_fraction=1.0):
             df[col] = default_val
 
     return df
-
 
 
 def _chronological_sample(df: pd.DataFrame, sample_fraction: float) -> pd.DataFrame:
@@ -227,7 +100,6 @@ def _chronological_sample(df: pd.DataFrame, sample_fraction: float) -> pd.DataFr
     n_keep = max(1, int(len(trip_start) * sample_fraction))
     keep_trips = trip_start.index[:n_keep]
     return df[df['trip_id'].isin(keep_trips)].copy()
-
 
 
 def load_train_test_val_data_fixed(data_folder='./data', sample_fraction=1.0):

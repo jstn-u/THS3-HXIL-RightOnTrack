@@ -63,7 +63,7 @@ def build_segments_fixed(df, clusters):
 
     cluster_tree = BallTree(np.radians(clusters), metric='haversine')
 
-    CLUSTER_ASSIGN_RADIUS_M = 300
+    CLUSTER_ASSIGN_RADIUS_M = 150
     CLUSTER_ASSIGN_RADIUS_RAD = CLUSTER_ASSIGN_RADIUS_M / 6371000
 
     valid_gps = df['is_gps_valid'] == 1

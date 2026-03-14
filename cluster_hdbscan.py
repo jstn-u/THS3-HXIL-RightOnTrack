@@ -34,7 +34,7 @@ from config import print_section, haversine_meters
 # HDBSCAN EVENT-DRIVEN CLUSTERING
 # =============================================================================
 
-def event_driven_clustering_fixed(df, known_stops=None, merge_radius_m=300):
+def event_driven_clustering_fixed(df, known_stops=None, merge_radius_m=450):
     """
     Event-driven clustering on dwell/slowdown points via HDBSCAN.
 
@@ -225,7 +225,7 @@ def event_driven_clustering_fixed(df, known_stops=None, merge_radius_m=300):
     #    Every decision is printed with the distance to the nearest kept
     #    coordinate.
     # ------------------------------------------------------------------
-    MIN_CLUSTER_SPACING_M = 300
+    MIN_CLUSTER_SPACING_M = 150
 
     final_delay = []
     # Seed the kept-coords list with all station positions so delay clusters

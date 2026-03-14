@@ -20,10 +20,10 @@ class Config:
     # =============================================================================
 
     # Sampling
-    sample_fraction = 0.6  # Use all data (or 0.1 for 10% sample)
+    sample_fraction = 0.2 # Use all data (or 0.1 for 10% sample)
 
     # Training
-    n_iterations = 1  # Number of complete training runs
+    n_iterations = 5  # Number of complete training runs
     n_epochs = 50  # Epochs per iteration
     batch_size = 64  # Batch size
 
@@ -39,7 +39,7 @@ class Config:
     # Learning rate scheduling
     lr_scheduler_factor = 0.5
     lr_scheduler_patience = 5
-    early_stopping_patience = 15
+    early_stopping_patience = 50
 
     # =============================================================================
     # MODEL ARCHITECTURE
