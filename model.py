@@ -25,7 +25,9 @@ from torch.utils.data import Dataset, DataLoader
 import torch.optim as optim
 
 from config import Config, DEVICE, print_section, haversine_meters
-from mtl import MTLHead, MTLLoss
+from mtl import (MTLHead, MTLLoss,
+                 DualTaskMTLHead, DualTaskMTLLoss,
+                 MAGNN_LSTM_DualTaskMTL, TripSequenceEncoder)
 
 warnings.filterwarnings('ignore')
 
@@ -220,7 +222,11 @@ class EnhancedSegmentDataset(SegmentDataset):
 
         self.weather_cols_scaled = [f'{col}_scaled' for col in weather_cols]
 
+    # BEFORE (line 235-239)
+    # AFTER
     def __getitem__(self, idx):
+        from residual import split_features_for_segment  # import at top of file instead
+
         row = self.segments_df.iloc[idx]
         seg_type_idx = int(row['seg_type_idx'])
         seq_len = int(row['seq_len'])
@@ -231,11 +237,26 @@ class EnhancedSegmentDataset(SegmentDataset):
             float(row['speed_scaled']),
         ])
 
-        operational = torch.FloatTensor([float(row[col]) for col in self.operational_cols_scaled])
-        weather = torch.FloatTensor([float(row[col]) for col in self.weather_cols_scaled])
+        # Split into endpoint-aware tensors using GPS lookup if available,
+        # otherwise falls back to the averaged values (both endpoints identical)
+        feats = split_features_for_segment(
+            row,
+            gps_lookup=getattr(self, 'gps_lookup', None),
+            mapper=getattr(self, 'station_mapper', None),
+        )
+
+        context_flags = torch.FloatTensor(feats['context_flags'])  # (2,)
+        origin_operational = torch.FloatTensor(feats['origin_operational'])  # (2,)
+        dest_operational = torch.FloatTensor(feats['dest_operational'])  # (2,)
+        origin_weather = torch.FloatTensor(feats['origin_weather'])  # (8,)
+        dest_weather = torch.FloatTensor(feats['dest_weather'])  # (8,)
+
         target = torch.FloatTensor([float(row['duration_scaled'])])
 
-        return seg_type_idx, temporal, operational, weather, target, seq_len
+        return (seg_type_idx, temporal,
+                context_flags, origin_operational, dest_operational,
+                origin_weather, dest_weather,
+                target, seq_len)
 
 # =============================================================================
 # PATH DATASET (✅ UPDATED WITH BINARY FLAGS)
@@ -395,7 +416,266 @@ class PathDataset(Dataset):
 
 
 # =============================================================================
+<<<<<<< Updated upstream
 # MODELS (NO CHANGES TO CORE ARCHITECTURE)
+=======
+# TRIP DATASET  — groups segments by trip_id + calendar day
+# =============================================================================
+
+class TripDataset(Dataset):
+    """
+    Each sample is a chronologically ordered sequence of segments belonging
+    to the same trip_id on the same calendar day.
+
+    A 'trip' is defined as: all rows in segments_df that share the same
+    trip_id AND whose departure date (derived from hour + day_of_week) falls
+    on the same day.  In practice trip_id already encodes the vehicle run, so
+    the same-day filter is a safety guard against trips that cross midnight.
+
+    Each item returned:
+        seg_indices        LongTensor  (T,)
+        temporal           FloatTensor (T, 5)
+        context_flags      FloatTensor (T, 2)   is_weekend, is_peak_hour
+        origin_operational FloatTensor (T, 2)   arrivalDelay, departureDelay @ origin
+        dest_operational   FloatTensor (T, 2)   same @ destination
+        origin_weather     FloatTensor (T, 8)
+        dest_weather       FloatTensor (T, 8)
+        seg_targets        FloatTensor (T, 1)   per-segment duration (scaled)
+        trip_target        FloatTensor (1,)     total trip duration (scaled)
+        seq_len            int                  actual number of segments
+
+    Pads all sequences to max_trip_length with zeros.
+    """
+
+    MAX_TRIP_LEN = 15   # cap very long runs; adjust via constructor
+
+    def __init__(self,
+                 segments_df,
+                 segment_types,
+                 max_trip_length: int = 15,
+                 fit_scalers: bool = True,
+                 target_scaler: RobustScaler = None,
+                 speed_scaler: RobustScaler = None,
+                 operational_scaler: RobustScaler = None,
+                 weather_scaler: RobustScaler = None):
+
+        self.max_trip_length  = max_trip_length
+        self.segment_types    = list(segment_types)
+        self.seg_to_idx       = {s: i for i, s in enumerate(self.segment_types)}
+
+        df = segments_df.copy()
+
+        # ── Cyclical temporal features ────────────────────────────────
+        df['hour_sin'] = np.sin(2 * np.pi * df['hour'] / 24)
+        df['hour_cos'] = np.cos(2 * np.pi * df['hour'] / 24)
+        df['dow_sin']  = np.sin(2 * np.pi * df['day_of_week'] / 7)
+        df['dow_cos']  = np.cos(2 * np.pi * df['day_of_week'] / 7)
+
+        # ── Speed scaler ──────────────────────────────────────────────
+        if 'speed_mps' not in df.columns:
+            df['speed_mps'] = 0.0
+        speed_vals = df[['speed_mps']].replace([np.inf, -np.inf], np.nan)
+        if fit_scalers:
+            self.speed_scaler = RobustScaler()
+            df['speed_scaled'] = self.speed_scaler.fit_transform(
+                speed_vals.fillna(speed_vals.median())).flatten()
+        else:
+            self.speed_scaler = speed_scaler
+            df['speed_scaled'] = self.speed_scaler.transform(
+                speed_vals.fillna(speed_vals.median())).flatten()
+        df['speed_scaled'] = np.nan_to_num(df['speed_scaled'].values, nan=0.0)
+
+        # ── Duration scaler ───────────────────────────────────────────
+        if fit_scalers:
+            self.target_scaler = RobustScaler()
+            df['duration_scaled'] = self.target_scaler.fit_transform(
+                df[['duration_sec']]).flatten()
+        else:
+            self.target_scaler = target_scaler
+            df['duration_scaled'] = self.target_scaler.transform(
+                df[['duration_sec']]).flatten()
+
+        # ── Operational scaler (continuous only) ─────────────────────
+        cont_op_cols = ['arrivalDelay', 'departureDelay']
+        for c in cont_op_cols:
+            if c not in df.columns:
+                df[c] = 0.0
+        op_data = df[cont_op_cols].replace([np.inf, -np.inf], np.nan).fillna(0.0)
+        if fit_scalers:
+            self.operational_scaler = RobustScaler()
+            op_scaled = self.operational_scaler.fit_transform(op_data)
+        else:
+            self.operational_scaler = operational_scaler
+            op_scaled = self.operational_scaler.transform(op_data)
+        df['arrivalDelay_scaled']   = op_scaled[:, 0]
+        df['departureDelay_scaled'] = op_scaled[:, 1]
+
+        # binary flags — no scaling
+        for c in ['is_weekend', 'is_peak_hour']:
+            if c not in df.columns:
+                df[c] = 0.0
+
+        # ── Weather scaler ────────────────────────────────────────────
+        wx_cols = ['temperature_2m', 'apparent_temperature', 'precipitation',
+                   'rain', 'snowfall', 'windspeed_10m', 'windgusts_10m',
+                   'winddirection_10m']
+        for c in wx_cols:
+            if c not in df.columns:
+                df[c] = 0.0
+        wx_data = df[wx_cols].replace([np.inf, -np.inf], np.nan).fillna(0.0)
+        if fit_scalers:
+            wx_mean = wx_data.mean().mean()
+            wx_std  = wx_data.std().mean()
+            if abs(wx_mean) < 0.5 and 0.5 < wx_std < 1.5:
+                self.weather_scaler = None
+                wx_scaled = wx_data.values
+            else:
+                self.weather_scaler = RobustScaler()
+                wx_scaled = self.weather_scaler.fit_transform(wx_data)
+        else:
+            self.weather_scaler = weather_scaler
+            wx_scaled = (self.weather_scaler.transform(wx_data)
+                         if self.weather_scaler is not None
+                         else wx_data.values)
+        for i, c in enumerate(wx_cols):
+            df[f'{c}_scaled'] = wx_scaled[:, i]
+
+        # ── Drop rows with unknown segment types ──────────────────────
+        df['seg_type_idx'] = df['segment_id'].map(self.seg_to_idx)
+        n_before = len(df)
+        df = df.dropna(subset=['seg_type_idx']).copy()
+        df['seg_type_idx'] = df['seg_type_idx'].astype(int)
+        if len(df) < n_before:
+            print(f"   TripDataset: dropped {n_before - len(df):,} rows "
+                  f"with unseen segment types")
+
+        # ── Group into trips (trip_id + day_of_week as proxy for date) ─
+        # segments_df contains 'hour' and 'day_of_week' from departure_time
+        # We use trip_id as the primary key.  Within each trip_id we sort
+        # chronologically by hour (good enough — trips rarely span >1 hour).
+        trips = []
+        for tid, grp in df.groupby('trip_id', sort=False):
+            grp = grp.sort_values('hour').reset_index(drop=True)
+
+            # Same-day guard: split at midnight crossings
+            # (day_of_week changes mid-trip → separate trips)
+            day_changes = (grp['day_of_week'].diff().fillna(0) != 0)
+            split_ids   = day_changes.cumsum()
+            for _, sub in grp.groupby(split_ids):
+                sub = sub.reset_index(drop=True)
+                if len(sub) < 2:          # at least 2 segments to form a trip
+                    continue
+                if len(sub) > max_trip_length:
+                    sub = sub.head(max_trip_length)
+                trips.append(sub)
+
+        self.trips = trips
+        print(f"   TripDataset: {len(trips):,} trips built from "
+              f"{len(df):,} segments  "
+              f"(max_trip_length={max_trip_length})")
+        if trips:
+            lengths = [len(t) for t in trips]
+            print(f"     Trip length: min={min(lengths)}, "
+                  f"max={max(lengths)}, "
+                  f"mean={np.mean(lengths):.1f}")
+
+        self._wx_cols_scaled = [f'{c}_scaled' for c in wx_cols]
+
+    def __len__(self):
+        return len(self.trips)
+
+    def __getitem__(self, idx):
+        from residual import split_features_for_segment
+
+        trip = self.trips[idx]
+        seq_len = len(trip)
+        T = self.max_trip_length
+
+        seg_indices        = torch.zeros(T, dtype=torch.long)
+        temporal           = torch.zeros(T, 5)
+        context_flags      = torch.zeros(T, 2)
+        origin_operational = torch.zeros(T, 2)
+        dest_operational   = torch.zeros(T, 2)
+        origin_weather     = torch.zeros(T, 8)
+        dest_weather       = torch.zeros(T, 8)
+        seg_targets        = torch.zeros(T, 1)
+
+        for t, (_, row) in enumerate(trip.iterrows()):
+            seg_indices[t] = int(row['seg_type_idx'])
+            temporal[t] = torch.tensor([
+                float(row['hour_sin']), float(row['hour_cos']),
+                float(row['dow_sin']),  float(row['dow_cos']),
+                float(row['speed_scaled']),
+            ])
+
+            feats = split_features_for_segment(
+                row,
+                gps_lookup=getattr(self, 'gps_lookup', None),
+                mapper=getattr(self, 'station_mapper', None),
+            )
+            context_flags[t]      = torch.FloatTensor(feats['context_flags'])
+            origin_operational[t] = torch.FloatTensor(feats['origin_operational'])
+            dest_operational[t]   = torch.FloatTensor(feats['dest_operational'])
+            origin_weather[t]     = torch.FloatTensor(feats['origin_weather'])
+            dest_weather[t]       = torch.FloatTensor(feats['dest_weather'])
+            seg_targets[t, 0]     = float(row['duration_scaled'])
+
+        # Global target = sum of actual (scaled) segment durations
+        # We invert, sum, then re-scale so the global target is in the
+        # same scaled space as individual targets.
+        raw_durations = np.array([float(r['duration_sec'])
+                                  for _, r in trip.iterrows()]).reshape(-1, 1)
+        total_sec = raw_durations.sum()
+        trip_target = torch.FloatTensor(
+            self.target_scaler.transform([[total_sec]])[0])   # (1,)
+
+        return (seg_indices, temporal,
+                context_flags, origin_operational, dest_operational,
+                origin_weather, dest_weather,
+                seg_targets, trip_target, seq_len)
+
+
+def trip_collate_fn(batch):
+    """
+    Collate function for TripDataset.
+
+    Returns
+    -------
+    seg_indices        (B, T)
+    temporal           (B, T, 5)
+    context_flags      (B, T, 2)
+    origin_operational (B, T, 2)
+    dest_operational   (B, T, 2)
+    origin_weather     (B, T, 8)
+    dest_weather       (B, T, 8)
+    seg_targets        (B, T, 1)   per-segment scaled durations
+    trip_targets       (B, 1)      total trip scaled duration
+    lengths            (B,)        actual trip lengths
+    mask               (B, T)      True = valid segment
+    """
+    seg_indices        = torch.stack([b[0] for b in batch])   # (B, T)
+    temporal           = torch.stack([b[1] for b in batch])   # (B, T, 5)
+    context_flags      = torch.stack([b[2] for b in batch])
+    origin_operational = torch.stack([b[3] for b in batch])
+    dest_operational   = torch.stack([b[4] for b in batch])
+    origin_weather     = torch.stack([b[5] for b in batch])
+    dest_weather       = torch.stack([b[6] for b in batch])
+    seg_targets        = torch.stack([b[7] for b in batch])   # (B, T, 1)
+    trip_targets       = torch.stack([b[8] for b in batch])   # (B, 1)
+    lengths            = torch.LongTensor([b[9] for b in batch])
+
+    T    = seg_indices.size(1)
+    mask = torch.arange(T).unsqueeze(0) < lengths.unsqueeze(1)  # (B, T)
+
+    return (seg_indices, temporal,
+            context_flags, origin_operational, dest_operational,
+            origin_weather, dest_weather,
+            seg_targets, trip_targets, lengths, mask)
+
+
+# =============================================================================
+# MODELS (CORE ARCHITECTURE)
+>>>>>>> Stashed changes
 # =============================================================================
 
 class GraphAttentionLayer(nn.Module):
@@ -698,6 +978,14 @@ class MAGNN_LSTM_MTL(nn.Module):
             return collective_pred
 
 
+<<<<<<< Updated upstream
+=======
+# MAGNN_LSTM_DualTaskMTL is imported from mtl.py
+# It wraps a frozen MAGNN_LSTM_Residual as the per-segment encoder
+# and adds a TripSequenceEncoder + DualTaskMTLHead on top.
+
+
+>>>>>>> Stashed changes
 class SimpleMLP(nn.Module):
     def __init__(self, num_segments, embed_dim=32, dropout=0.3):
         super().__init__()
@@ -741,35 +1029,34 @@ def masked_collate_fn(batch):
     return seg_indices, temporal_pad, targets, lengths, mask
 
 
+# AFTER
 def enhanced_collate_fn(batch):
     seg_indices = torch.LongTensor([item[0] for item in batch])
-    targets = torch.stack([item[4] for item in batch])
-    lengths = torch.LongTensor([item[5] for item in batch])
-    max_len = int(lengths.max().item())
+    targets     = torch.stack([item[7] for item in batch])
+    lengths     = torch.LongTensor([item[8] for item in batch])
 
-    temporal_seqs = [item[1].unsqueeze(0) for item in batch]
-    temporal_dim = temporal_seqs[0].size(-1)
-    temporal_pad = torch.zeros(len(batch), max_len, temporal_dim)
-    for i, (seq, slen) in enumerate(zip(temporal_seqs, lengths)):
-        slen = int(slen.item())
-        temporal_pad[i, :slen, :] = seq[:slen]
+    def _pad(tensors, lengths):
+        max_len = int(max(lengths))
+        dim = tensors[0].size(-1)
+        out = torch.zeros(len(tensors), max_len, dim)
+        for i, (t, l) in enumerate(zip(tensors, lengths)):
+            out[i, :int(l), :] = t.unsqueeze(0)[:, :int(l), :]
+        return out
 
-    operational_seqs = [item[2].unsqueeze(0) for item in batch]
-    operational_dim = operational_seqs[0].size(-1)
-    operational_pad = torch.zeros(len(batch), max_len, operational_dim)
-    for i, (seq, slen) in enumerate(zip(operational_seqs, lengths)):
-        slen = int(slen.item())
-        operational_pad[i, :slen, :] = seq[:slen]
+    temporal_pad        = _pad([item[1].unsqueeze(0) for item in batch], lengths)
+    context_pad         = _pad([item[2].unsqueeze(0) for item in batch], lengths)
+    origin_op_pad       = _pad([item[3].unsqueeze(0) for item in batch], lengths)
+    dest_op_pad         = _pad([item[4].unsqueeze(0) for item in batch], lengths)
+    origin_weather_pad  = _pad([item[5].unsqueeze(0) for item in batch], lengths)
+    dest_weather_pad    = _pad([item[6].unsqueeze(0) for item in batch], lengths)
 
-    weather_seqs = [item[3].unsqueeze(0) for item in batch]
-    weather_dim = weather_seqs[0].size(-1)
-    weather_pad = torch.zeros(len(batch), max_len, weather_dim)
-    for i, (seq, slen) in enumerate(zip(weather_seqs, lengths)):
-        slen = int(slen.item())
-        weather_pad[i, :slen, :] = seq[:slen]
+    mask = torch.arange(temporal_pad.size(1)).unsqueeze(0) < lengths.unsqueeze(1)
 
-    mask = torch.arange(max_len).unsqueeze(0) < lengths.unsqueeze(1)
-    return seg_indices, temporal_pad, operational_pad, weather_pad, targets, lengths, mask
+    return (seg_indices,
+            temporal_pad, context_pad,
+            origin_op_pad, dest_op_pad,
+            origin_weather_pad, dest_weather_pad,
+            targets, lengths, mask)
 
 
 def path_collate_fn(batch):
@@ -1287,6 +1574,263 @@ def train_magnn_lstm_mtl(train_loader, val_loader, test_loader,
     return results, model
 
 
+<<<<<<< Updated upstream
+=======
+# =============================================================================
+# DUAL-TASK MTL TRAINING FUNCTION  (trip-aware, residual-encoder)
+# =============================================================================
+
+def train_magnn_lstm_dualtask_mtl(train_loader, val_loader, test_loader,
+                                   adj_geo, adj_dist, adj_soc,
+                                   segment_types, scaler,
+                                   output_folder, device, cfg,
+                                   pretrained_residual_model=None,
+                                   pretrained_magnn_path=None,
+                                   freeze_magnn=True):
+    """
+    Train MAGNN-LSTM-DualTaskMTL.
+
+    LOCAL  task: predict each segment's duration within a trip.
+    GLOBAL task: predict the total trip travel time
+                 (sum of all segment durations, same trip_id + same day).
+
+    The model wraps a frozen MAGNN_LSTM_Residual as its per-segment encoder.
+    Only the TripSequenceEncoder and DualTaskMTLHead are trained here.
+
+    Parameters
+    ----------
+    pretrained_residual_model : MAGNN_LSTM_Residual | None
+        If provided and already on `device`, used directly.
+        Otherwise a fresh residual model is built from pretrained_magnn_path.
+    pretrained_magnn_path : str | None
+        Path to a saved MAGTTE checkpoint; used when
+        pretrained_residual_model is None.
+    """
+    from residual import MAGNN_LSTM_Residual
+
+    print_section("MAGNN-LSTM-DUALTASK-MTL TRAINING  (Trip-Aware Residual Encoder)")
+    num_segments = len(segment_types)
+
+    # ── Build / reuse the residual encoder ─────────────────────────────
+    if pretrained_residual_model is not None:
+        residual_enc = pretrained_residual_model
+        print("   ✓ Reusing pre-trained MAGNN_LSTM_Residual encoder")
+    else:
+        magnn_base = MAGTTE(
+            num_segments, cfg.n_heads, cfg.node_embed_dim,
+            cfg.gat_hidden, cfg.lstm_hidden, cfg.historical_dim,
+            cfg.dropout).to(device)
+        magnn_base.set_adjacency_matrices(adj_geo, adj_dist, adj_soc)
+
+        if pretrained_magnn_path and os.path.exists(pretrained_magnn_path):
+            magnn_base.load_state_dict(
+                torch.load(pretrained_magnn_path, map_location=device))
+            print(f"   ✓ Loaded pre-trained MAGNN from {pretrained_magnn_path}")
+
+        residual_enc = MAGNN_LSTM_Residual(
+            magnn_base,
+            spatial_dim=cfg.gat_hidden,
+            freeze_magnn=freeze_magnn,
+            lstm_hidden=128,
+            lstm_layers=1,
+            dropout=0.2,
+            temporal_dim=5,
+        ).to(device)
+        print("   ✓ Built fresh MAGNN_LSTM_Residual encoder")
+
+    # ── Build the DualTaskMTL wrapper ───────────────────────────────────
+    model = MAGNN_LSTM_DualTaskMTL(
+        residual_model=residual_enc,
+        spatial_dim=cfg.gat_hidden,
+        enc_hidden=128,
+        local_hidden=64,
+        global_hidden=128,
+        dropout=0.2,
+    ).to(device)
+
+    n_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
+    print(f"   Trainable params: {n_params:,}  "
+          f"(only TripEncoder + MTLHead)")
+
+    lr = getattr(cfg, 'residual_learning_rate', 5e-4)
+    wd = getattr(cfg, 'lstm_weight_decay', 1e-6)
+
+    optimizer = optim.Adam(
+        filter(lambda p: p.requires_grad, model.parameters()),
+        lr=lr, weight_decay=wd)
+    scheduler = optim.lr_scheduler.ReduceLROnPlateau(
+        optimizer, mode='min', factor=0.5, patience=5)
+    criterion = DualTaskMTLLoss()
+
+    best_val_loss    = float('inf')
+    patience_counter = 0
+    best_ckpt = os.path.join(output_folder,
+                             'magnn_lstm_dualtask_mtl_best.pth')
+
+    def _unpack(batch, dev):
+        (seg_idx, temporal, ctx, o_op, d_op,
+         o_wx, d_wx, seg_tgt, trip_tgt, lengths, mask) = batch
+        return (seg_idx.to(dev), temporal.to(dev),
+                ctx.to(dev), o_op.to(dev), d_op.to(dev),
+                o_wx.to(dev), d_wx.to(dev),
+                seg_tgt.to(dev), trip_tgt.to(dev),
+                lengths.to(dev), mask.to(dev))
+
+    print()
+    for epoch in range(1, cfg.n_epochs + 1):
+        model.train()
+        tr_total = tr_local = tr_global = 0.0
+        n_batches = 0
+
+        for batch in train_loader:
+            (seg_idx, temporal, ctx, o_op, d_op,
+             o_wx, d_wx, seg_tgt, trip_tgt,
+             lengths, mask) = _unpack(batch, device)
+
+            local_preds, global_pred = model(
+                seg_idx, temporal, ctx, o_op, d_op,
+                o_wx, d_wx, mask, lengths, return_local=True)
+
+            loss, ld = criterion(
+                local_preds, global_pred,
+                seg_tgt, trip_tgt, mask,
+                model.mtl_head.log_var_local,
+                model.mtl_head.log_var_global)
+
+            if torch.isnan(loss) or torch.isinf(loss):
+                continue
+
+            optimizer.zero_grad()
+            loss.backward()
+            torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+            optimizer.step()
+
+            tr_total  += ld['total']
+            tr_local  += ld['local']
+            tr_global += ld['global']
+            n_batches += 1
+
+        tr_total  /= max(n_batches, 1)
+        tr_local  /= max(n_batches, 1)
+        tr_global /= max(n_batches, 1)
+
+        # ── Validation ───────────────────────────────────────────────
+        model.eval()
+        val_loss = 0.0
+        val_preds, val_targets = [], []
+        n_val = 0
+
+        with torch.no_grad():
+            for batch in val_loader:
+                (seg_idx, temporal, ctx, o_op, d_op,
+                 o_wx, d_wx, seg_tgt, trip_tgt,
+                 lengths, mask) = _unpack(batch, device)
+
+                local_preds, global_pred = model(
+                    seg_idx, temporal, ctx, o_op, d_op,
+                    o_wx, d_wx, mask, lengths, return_local=True)
+
+                loss, ld = criterion(
+                    local_preds, global_pred,
+                    seg_tgt, trip_tgt, mask,
+                    model.mtl_head.log_var_local,
+                    model.mtl_head.log_var_global)
+
+                if not torch.isnan(loss) and not torch.isinf(loss):
+                    val_loss += ld['total']
+                    n_val    += 1
+                    val_preds.append(global_pred.cpu().numpy())
+                    val_targets.append(trip_tgt.cpu().numpy())
+
+        val_loss /= max(n_val, 1)
+        scheduler.step(val_loss)
+
+        if val_preds:
+            vp = scaler.inverse_transform(np.concatenate(val_preds))
+            vt = scaler.inverse_transform(np.concatenate(val_targets))
+            val_r2 = r2_score(vt, vp)
+        else:
+            val_r2 = float('nan')
+
+        if epoch % max(1, cfg.n_epochs // 5) == 0 or epoch == 1:
+            print(f"  Epoch {epoch:>3}/{cfg.n_epochs}  "
+                  f"loss={tr_total:.4f} "
+                  f"(local:{tr_local:.4f} global:{tr_global:.4f})  "
+                  f"val_loss={val_loss:.4f}  val_R²={val_r2:.4f}")
+
+        if not np.isnan(val_loss) and val_loss < best_val_loss:
+            best_val_loss    = val_loss
+            patience_counter = 0
+            torch.save(model.state_dict(), best_ckpt)
+        else:
+            patience_counter += 1
+            if patience_counter >= cfg.early_stopping_patience:
+                print(f"\n  ⏹️  Early stopping at epoch {epoch}")
+                break
+
+    if os.path.exists(best_ckpt):
+        model.load_state_dict(torch.load(best_ckpt, map_location=device))
+
+    # ── Final evaluation ─────────────────────────────────────────────
+    print_section("MAGNN-LSTM-DUALTASK-MTL — FINAL RESULTS")
+
+    def _eval(loader, name):
+        model.eval()
+        preds, targets = [], []
+        with torch.no_grad():
+            for batch in loader:
+                (seg_idx, temporal, ctx, o_op, d_op,
+                 o_wx, d_wx, seg_tgt, trip_tgt,
+                 lengths, mask) = _unpack(batch, device)
+
+                global_pred = model(
+                    seg_idx, temporal, ctx, o_op, d_op,
+                    o_wx, d_wx, mask, lengths, return_local=False)
+
+                preds.append(global_pred.cpu().numpy())
+                targets.append(trip_tgt.cpu().numpy())
+
+        if not preds:
+            return {}
+
+        p = scaler.inverse_transform(np.concatenate(preds))
+        t = scaler.inverse_transform(np.concatenate(targets))
+        r2   = r2_score(t, p)
+        rmse = np.sqrt(mean_squared_error(t, p))
+        mae  = mean_absolute_error(t, p)
+        mv   = t.flatten() > 0
+        mape = (np.mean(np.abs((t.flatten()[mv] - p.flatten()[mv]) /
+                               t.flatten()[mv])) * 100
+                if mv.any() else float('nan'))
+
+        print(f"   {name:<6}  R²={r2:.4f}  RMSE={rmse:.2f}s  "
+              f"MAE={mae:.2f}s  MAPE={mape:.2f}%")
+        return {'r2': r2, 'rmse': rmse, 'mae': mae, 'mape': mape,
+                'preds': p.flatten().tolist(),
+                'actual': t.flatten().tolist()}
+
+    results = {
+        'Train': _eval(train_loader, 'Train'),
+        'Val':   _eval(val_loader,   'Val'),
+        'Test':  _eval(test_loader,  'Test'),
+    }
+
+    test_res = results.get('Test', {})
+    if test_res.get('preds'):
+        print(f"\n{'Idx':>4}  {'Actual(s)':>10}  {'Pred(s)':>10}  "
+              f"{'Error(s)':>9}  {'Error%':>7}")
+        print("  " + "-" * 48)
+        for i in range(min(20, len(test_res['actual']))):
+            a, p_v = test_res['actual'][i], test_res['preds'][i]
+            err  = p_v - a
+            epct = (err / a * 100) if a > 0 else 0.0
+            print(f"  {i:>3}  {a:>10.2f}  {p_v:>10.2f}  "
+                  f"{err:>9.2f}  {epct:>6.2f}%")
+
+    return results, model
+
+
+>>>>>>> Stashed changes
 def train_simple(train_loader, val_loader, test_loader, segment_types, scaler,
                  output_folder, device, n_epochs=50, lr=0.001, dropout=0.3):
     print_section("SIMPLE MLP TRAINING")

@@ -20,7 +20,11 @@ class Config:
     # =============================================================================
 
     # Sampling
+<<<<<<< Updated upstream
     sample_fraction = 0.2  # Use all data (or 0.1 for 10% sample)
+=======
+    sample_fraction = 0.15  # Use all data (or 0.1 for 10% sample)
+>>>>>>> Stashed changes
 
     # Training
     n_iterations = 1  # Number of complete training runs
