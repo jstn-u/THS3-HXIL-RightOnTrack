@@ -45,6 +45,10 @@ download jsonl files: https://drive.google.com/drive/u/0/folders/1KlkrNklfQaCP7O
 
 python main.py --task train --batch_size 64 --epochs 50 --pooling_method attention --kernel_size 3 --alpha 0.1 --data_ratio 1.0 --log_file deeptte_run
 
+with iteration (until model testing):
+
+python main.py --task train  --iterations 30 --batch_size 64 --epochs 50 --pooling_method attention --kernel_size 3 --alpha 0.1 --data_ratio 1.0 --log_file deeptte_run
+
 ### **Parameters**
 
 - task: train/test
