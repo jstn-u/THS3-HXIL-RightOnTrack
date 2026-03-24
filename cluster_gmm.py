@@ -22,10 +22,6 @@ warnings.filterwarnings('ignore')
 
 from config import print_section, haversine_meters
 
-# =============================================================================
-# GMM CLUSTERING
-# =============================================================================
-
 def simple_clustering(df, n_clusters=50, speed_threshold=2.0):
     """
     Cluster transit stops using Gaussian Mixture Model (GMM).
@@ -122,9 +118,6 @@ def simple_clustering(df, n_clusters=50, speed_threshold=2.0):
     """
     print_section("STEP 2: CLUSTERING STOPS/STATIONS (GMM)")
 
-    # =========================================================================
-    # STEP 1: Input Validation
-    # =========================================================================
     if df.empty:
         print("✗ Empty DataFrame provided")
         return np.empty((0, 2)), {}
@@ -135,12 +128,6 @@ def simple_clustering(df, n_clusters=50, speed_threshold=2.0):
         print(f"✗ Missing required columns: {missing_cols}")
         return np.empty((0, 2)), {}
 
-    # =========================================================================
-    # STEP 2: Filter Low-Speed Points (Potential Stops)
-    # =========================================================================
-    # Rationale: Low-speed points indicate where vehicles stop or slow down,
-    # which typically corresponds to stations, stops, or traffic signals.
-    # Default threshold of 2.0 m/s (~7.2 km/h) captures most stop events.
     if 'speed_mps' in df.columns:
         stops = df[df['speed_mps'] < speed_threshold]
         print(f"✓ Found {len(stops):,} low-speed points (< {speed_threshold} m/s)")
@@ -148,9 +135,6 @@ def simple_clustering(df, n_clusters=50, speed_threshold=2.0):
         stops = df
         print(f"⚠️  No 'speed_mps' column - using all {len(stops):,} points")
 
-    # =========================================================================
-    # STEP 3: Extract and Validate Coordinates
-    # =========================================================================
     coords = stops[['latitude', 'longitude']].dropna()
 
     if coords.empty:
@@ -160,11 +144,6 @@ def simple_clustering(df, n_clusters=50, speed_threshold=2.0):
     # Filter invalid coordinates (0,0 is "null island" - indicates invalid GPS)
     coords = coords[(coords['latitude'] != 0) & (coords['longitude'] != 0)]
 
-    # =========================================================================
-    # STEP 4: Remove Statistical Outliers
-    # =========================================================================
-    # Rationale: GPS errors can create points far from the actual route.
-    # Using 3 standard deviations captures 99.7% of valid data points.
     lat_mean, lat_std = coords['latitude'].mean(), coords['latitude'].std()
     lon_mean, lon_std = coords['longitude'].mean(), coords['longitude'].std()
 
@@ -180,13 +159,8 @@ def simple_clustering(df, n_clusters=50, speed_threshold=2.0):
 
     print(f"✓ Using {len(coords):,} valid coordinates for clustering")
 
-    # =========================================================================
-    # STEP 5: Prepare Data and Adjust Parameters
-    # =========================================================================
     coord_values = coords[['latitude', 'longitude']].values
     n_points = len(coord_values)
-
-    # Adjust n_clusters if necessary (can't have more clusters than points/2)
     actual_n_clusters = min(n_clusters, n_points // 2)
     if actual_n_clusters != n_clusters:
         print(f"⚠️  Adjusted n_clusters from {n_clusters} to {actual_n_clusters} (data size constraint)")
@@ -201,77 +175,38 @@ def simple_clustering(df, n_clusters=50, speed_threshold=2.0):
     print(f"  tol: 1e-3 (convergence tolerance)")
     print(f"  init_params: 'kmeans' (initialize with k-means)")
     print(f"{'='*60}")
-
-    # =========================================================================
-    # STEP 6: Fit Gaussian Mixture Model
-    # =========================================================================
     print(f"\n✓ Running GMM clustering...")
 
     gmm = GaussianMixture(
         n_components=actual_n_clusters,
-        covariance_type='diag',     # Diagonal covariance — each component has
-                                    # independent lat/lon variances but no
-                                    # cross-axis covariance term. For geographic
-                                    # stop locations this is always appropriate:
-                                    # lat and lon spread are independent by
-                                    # definition. 'diag' eliminates the 2×2
-                                    # matrix inversion done on every EM step,
-                                    # replacing it with a cheap element-wise
-                                    # reciprocal — roughly 2-3× faster overall.
-        max_iter=200,               # Maximum EM iterations
-        n_init=3,                   # 3 restarts — sufficient with kmeans init;
-                                    # reduced from 5, saving ~40% of fit time
-        tol=1e-3,                   # Convergence tolerance
-        init_params='kmeans',       # Initialize with k-means for stability
-        random_state=42             # Reproducibility
+        covariance_type='diag',
+        max_iter=200,
+        n_init=3,
+        tol=1e-3,
+        init_params='kmeans',
+        random_state=42
     )
 
-    # Fit the model and get cluster assignments
     cluster_labels = gmm.fit_predict(coord_values)
-
-    # Extract cluster centers (Gaussian means)
     cluster_centers = gmm.means_
 
-    # =========================================================================
-    # STEP 7: Analyze GMM Results
-    # =========================================================================
     print(f"\n  GMM Results:")
     print(f"    Converged: {gmm.converged_}")
     print(f"    Iterations: {gmm.n_iter_}")
     print(f"    Log-likelihood: {gmm.lower_bound_:.4f}")
 
-    # Analyze component weights
     weights = gmm.weights_
     print(f"    Component weights: min={weights.min():.4f}, max={weights.max():.4f}")
 
-    # Calculate AIC and BIC for model selection reference
     aic = gmm.aic(coord_values)
     bic = gmm.bic(coord_values)
     print(f"    AIC: {aic:.2f}")
     print(f"    BIC: {bic:.2f}")
 
-    # =========================================================================
-    # STEP 8: Build Cluster Information Dictionary (VECTORIZED)
-    # =========================================================================
-    # Original approach: Python loop with a boolean mask per cluster to count
-    # sizes, then extracting the covariance matrix individually for each.
-    #
-    # Optimized approach:
-    #   - np.bincount counts all cluster sizes in one pass — no masks
-    #   - gmm.covariances_ with 'diag' is already shape (k, 2): each row is
-    #     [var_lat, var_lon]. Spread = sqrt(sum of variances) = sqrt(trace).
-    #     We compute all spreads in a single vectorized call.
-    #   - Covariance stored as a plain Python list of 2 floats (the diagonal)
-    #     rather than a 2×2 nested list — half the size, directly meaningful.
-
     n_components_actual = len(cluster_centers)
-
-    # Vectorized sizes
     sizes = np.bincount(cluster_labels, minlength=n_components_actual)
 
-    # Vectorized spread: covariances_ is (k, 2) for 'diag'; trace = sum of row
-    # sqrt(var_lat + var_lon) for each component simultaneously
-    spreads = np.sqrt(gmm.covariances_.sum(axis=1))   # shape (k,)
+    spreads = np.sqrt(gmm.covariances_.sum(axis=1))
 
     cluster_info = {
         i: {
@@ -279,17 +214,12 @@ def simple_clustering(df, n_clusters=50, speed_threshold=2.0):
             'size':       int(sizes[i]),
             'method':     'gmm',
             'weight':     float(weights[i]),
-            # Store 1D diagonal [var_lat, var_lon] — half the size of a 2×2
-            # list, and directly interpretable without unpacking a matrix
             'covariance': gmm.covariances_[i].tolist(),
             'spread':     float(spreads[i])
         }
         for i in range(n_components_actual)
     }
 
-    # =========================================================================
-    # STEP 9: Validate Clustering Results
-    # =========================================================================
     if not gmm.converged_:
         print("\n" + "=" * 60)
         print("⚠️  GMM WARNING: Did not converge")
@@ -302,25 +232,22 @@ def simple_clustering(df, n_clusters=50, speed_threshold=2.0):
         print("    - Try different covariance_type")
         print("=" * 60)
 
-    if len(cluster_centers) == 0:
-        print("\n" + "=" * 60)
-        print("✗ GMM CLUSTERING FAILED")
-        print("=" * 60)
-        print("  No valid clusters were found by the GMM algorithm.")
-        print("\n  Possible causes:")
-        print("    1. n_clusters is too high for the data size")
-        print("    2. Data has insufficient variance")
-        print("    3. Numerical instability in covariance estimation")
-        print("\n  Suggested fixes:")
-        print(f"    - Decrease n_clusters (current: {actual_n_clusters})")
-        print("    - Use 'diag' or 'spherical' covariance_type")
-        print("    - Increase sample_fraction to include more data")
-        print("=" * 60)
-        raise ValueError("GMM clustering failed: No valid clusters found. Cannot proceed.")
+    # if len(cluster_centers) == 0:
+    #     print("\n" + "=" * 60)
+    #     print("✗ GMM CLUSTERING FAILED")
+    #     print("=" * 60)
+    #     print("  No valid clusters were found by the GMM algorithm.")
+    #     print("\n  Possible causes:")
+    #     print("    1. n_clusters is too high for the data size")
+    #     print("    2. Data has insufficient variance")
+    #     print("    3. Numerical instability in covariance estimation")
+    #     print("\n  Suggested fixes:")
+    #     print(f"    - Decrease n_clusters (current: {actual_n_clusters})")
+    #     print("    - Use 'diag' or 'spherical' covariance_type")
+    #     print("    - Increase sample_fraction to include more data")
+    #     print("=" * 60)
+    #     raise ValueError("GMM clustering failed: No valid clusters found. Cannot proceed.")
 
-    # =========================================================================
-    # STEP 10: Print Summary Statistics
-    # =========================================================================
     print(f"\n{'='*60}")
     print(f"GMM CLUSTERING SUMMARY")
     print(f"{'='*60}")
@@ -366,20 +293,6 @@ def simple_clustering(df, n_clusters=50, speed_threshold=2.0):
 
 
 def event_driven_clustering_fixed(df, known_stops=None, n_clusters=50):
-    """
-    Adapter: replaces HDBSCAN-based clustering with GMM-based clustering
-    via `simple_clustering`.
-
-    Returns the same two-value tuple expected by the rest of the pipeline:
-        cluster_centers     : np.ndarray  shape (N, 2)  — [lat, lon] per cluster
-        station_cluster_ids : set of int  — always empty set; GMM does not
-                              distinguish station vs delay clusters. All cluster
-                              types are treated uniformly downstream.
-
-    The `known_stops` argument is accepted for API compatibility but is not
-    used by GMM clustering — the algorithm discovers all cluster locations
-    from the GPS data probability distributions directly.
-    """
     print_section("EVENT-DRIVEN CLUSTERING  (GMM adapter)")
 
     if known_stops:
@@ -387,19 +300,9 @@ def event_driven_clustering_fixed(df, known_stops=None, n_clusters=50):
               f"used by GMM — clusters are data-driven via EM.")
 
     cluster_centers, cluster_info = simple_clustering(df, n_clusters=n_clusters)
-
-    # station_cluster_ids: empty set — GMM does not label any cluster as a
-    # named station. Downstream code that checks membership in this set
-    # (e.g. visualisation) will simply see no pre-labelled station clusters.
     station_cluster_ids = set()
 
     print(f"   GMM clusters produced : {len(cluster_centers)}")
     print(f"   Station cluster IDs   : {station_cluster_ids} (none labelled by GMM)")
 
     return cluster_centers, station_cluster_ids
-
-
-# =============================================================================
-# SEGMENT BUILDING - CORRECTED VERSION
-# =============================================================================
-

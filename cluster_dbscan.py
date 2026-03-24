@@ -13,6 +13,23 @@ Public API (identical across all cluster_*.py modules):
 
 To switch clustering method in main.py, change only:
     from cluster_dbscan import event_driven_clustering_fixed
+
+    # =========================================================================
+    # K-DISTANCE ELBOW METHOD — FINDING OPTIMAL EPS (no external dependencies)
+    #
+    # Classic DBSCAN parameter selection (Ester et al. 1996):
+    #   1. Compute the distance to each point's k-th nearest neighbour
+    #      (k = min_samples).
+    #   2. Sort those distances in ascending order → the "k-distance plot".
+    #   3. The optimal eps is at the "elbow" — where the sorted curve bends
+    #      sharply upward, separating dense cluster interiors from sparse
+    #      noise / inter-cluster gaps.
+    #
+    # We detect the elbow by finding the point of maximum curvature: draw a
+    # straight line from the first to the last point on the sorted curve,
+    # then pick the point with the greatest perpendicular distance from
+    # that line.
+    # =========================================================================
 """
 
 import numpy as np
@@ -24,10 +41,6 @@ import warnings
 warnings.filterwarnings('ignore')
 
 from config import print_section, haversine_meters
-
-# =============================================================================
-# DBSCAN CLUSTERING
-# =============================================================================
 
 def simple_clustering(df, speed_threshold=2.0):
     """
@@ -126,9 +139,6 @@ def simple_clustering(df, speed_threshold=2.0):
     """
     print_section("STEP 2: CLUSTERING STOPS/STATIONS (DBSCAN)")
 
-    # =========================================================================
-    # STEP 1: Input Validation
-    # =========================================================================
     if df.empty:
         print("✗ Empty DataFrame provided")
         return np.empty((0, 2)), {}
@@ -139,9 +149,6 @@ def simple_clustering(df, speed_threshold=2.0):
         print(f"✗ Missing required columns: {missing_cols}")
         return np.empty((0, 2)), {}
 
-    # =========================================================================
-    # STEP 2: Filter Low-Speed Points (Potential Stops)
-    # =========================================================================
     if 'speed_mps' in df.columns:
         stops = df[df['speed_mps'] < speed_threshold]
         print(f"✓ Found {len(stops):,} low-speed points (< {speed_threshold} m/s)")
@@ -149,9 +156,6 @@ def simple_clustering(df, speed_threshold=2.0):
         stops = df
         print(f"⚠️  No 'speed_mps' column - using all {len(stops):,} points")
 
-    # =========================================================================
-    # STEP 3: Extract and Validate Coordinates
-    # =========================================================================
     coords = stops[['latitude', 'longitude']].dropna()
 
     if coords.empty:
@@ -160,9 +164,6 @@ def simple_clustering(df, speed_threshold=2.0):
 
     coords = coords[(coords['latitude'] != 0) & (coords['longitude'] != 0)]
 
-    # =========================================================================
-    # STEP 4: Remove Statistical Outliers
-    # =========================================================================
     lat_mean, lat_std = coords['latitude'].mean(), coords['latitude'].std()
     lon_mean, lon_std = coords['longitude'].mean(), coords['longitude'].std()
 
@@ -178,19 +179,15 @@ def simple_clustering(df, speed_threshold=2.0):
 
     print(f"✓ Using {len(coords):,} valid coordinates for clustering")
 
-    # =========================================================================
-    # STEP 5: Calculate DBSCAN Parameters (DENSITY-ADAPTIVE)
-    # =========================================================================
     n_points = len(coords)
     coord_values = coords[['latitude', 'longitude']].values
     coords_radians = np.radians(coord_values)
 
     min_samples = 3
 
-    EPS_FLOOR   = 10  / 6_371_000   # ~10 m
-    EPS_CEILING = 500 / 6_371_000   # ~500 m
+    EPS_FLOOR   = 10  / 6_371_000
+    EPS_CEILING = 500 / 6_371_000
 
-    # Sample for faster parameter search on large datasets
     if n_points > 10000:
         sample_size = 10000
         sample_indices = np.random.choice(n_points, sample_size, replace=False)
@@ -199,7 +196,6 @@ def simple_clustering(df, speed_threshold=2.0):
     else:
         sample_coords = coords_radians
 
-    # Seed bounds from median nearest-neighbour distance
     from sklearn.neighbors import NearestNeighbors as _NN
 
     unique_sample = np.unique(sample_coords, axis=0)
@@ -222,46 +218,25 @@ def simple_clustering(df, speed_threshold=2.0):
     print(f"  Bounds: [{eps_low*6_371_000:.1f}m, {eps_high*6_371_000:.1f}m]")
     print(f"\n✓ Finding optimal eps using k-distance elbow method...")
 
-    # =========================================================================
-    # K-DISTANCE ELBOW METHOD — FINDING OPTIMAL EPS (no external dependencies)
-    #
-    # Classic DBSCAN parameter selection (Ester et al. 1996):
-    #   1. Compute the distance to each point's k-th nearest neighbour
-    #      (k = min_samples).
-    #   2. Sort those distances in ascending order → the "k-distance plot".
-    #   3. The optimal eps is at the "elbow" — where the sorted curve bends
-    #      sharply upward, separating dense cluster interiors from sparse
-    #      noise / inter-cluster gaps.
-    #
-    # We detect the elbow by finding the point of maximum curvature: draw a
-    # straight line from the first to the last point on the sorted curve,
-    # then pick the point with the greatest perpendicular distance from
-    # that line.
-    # =========================================================================
-    k_for_eps = min_samples  # standard: use same k as min_samples
+    k_for_eps = min_samples
 
     nn_eps = _NN(n_neighbors=k_for_eps + 1, metric='haversine', algorithm='ball_tree')
     nn_eps.fit(unique_sample)
     k_dists_all, _ = nn_eps.kneighbors(unique_sample)
-    k_distances = np.sort(k_dists_all[:, k_for_eps])  # k-th NN distance, sorted
-
-    # --- Elbow detection via max perpendicular distance ---
+    k_distances = np.sort(k_dists_all[:, k_for_eps])
     n_pts = len(k_distances)
     x = np.arange(n_pts, dtype=float)
     y = k_distances
 
-    # Line from first to last point
     p1 = np.array([x[0], y[0]])
     p2 = np.array([x[-1], y[-1]])
     line_vec = p2 - p1
     line_len = np.linalg.norm(line_vec)
 
     if line_len < 1e-12:
-        # Degenerate case — all distances identical
         eps_radians = float(np.clip(y[0], EPS_FLOOR, EPS_CEILING))
     else:
         line_unit = line_vec / line_len
-        # Perpendicular distance of every point to the line
         point_vecs = np.column_stack([x - p1[0], y - p1[1]])
         projections = point_vecs @ line_unit
         proj_points = np.outer(projections, line_unit)
@@ -291,9 +266,6 @@ def simple_clustering(df, speed_threshold=2.0):
     print(f"  Method: k-distance elbow (k={k_for_eps})")
     print(f"{'='*60}")
 
-    # =========================================================================
-    # STEP 6: Apply DBSCAN Clustering
-    # =========================================================================
     print(f"\n✓ Running DBSCAN clustering...")
 
     dbscan = DBSCAN(
@@ -306,9 +278,6 @@ def simple_clustering(df, speed_threshold=2.0):
 
     cluster_labels = dbscan.fit_predict(coords_radians)
 
-    # =========================================================================
-    # STEP 7: Analyze Clustering Results
-    # =========================================================================
     unique_labels = np.unique(cluster_labels)
     n_clusters_found = len(unique_labels) - (1 if unique_labels[0] == -1 else 0)
     n_noise = int(np.sum(cluster_labels == -1))
@@ -323,9 +292,6 @@ def simple_clustering(df, speed_threshold=2.0):
     n_core_points = len(core_sample_indices)
     print(f"    Core points: {n_core_points:,} ({n_core_points/len(cluster_labels)*100:.1f}%)")
 
-    # =========================================================================
-    # STEP 8: Extract Cluster Centers (VECTORIZED)
-    # =========================================================================
     valid_cluster_ids = unique_labels[unique_labels >= 0]
     core_labels = cluster_labels[core_sample_indices]
 
@@ -362,32 +328,26 @@ def simple_clustering(df, speed_threshold=2.0):
     if cluster_info:
         cluster_info[0]['n_noise_points_total'] = n_noise
 
-    # =========================================================================
-    # STEP 9: Validate Clustering Results
-    # =========================================================================
-    if len(cluster_centers) == 0:
-        print("\n" + "=" * 60)
-        print("✗ DBSCAN CLUSTERING FAILED")
-        print("=" * 60)
-        print("  No valid clusters were found by the DBSCAN algorithm.")
-        print("\n  Possible causes:")
-        print("    1. eps is too small - points are too far apart for given radius")
-        print("    2. min_samples is too high - not enough dense regions")
-        print("    3. Data is too sparse - no natural dense groupings exist")
-        print("    4. Data quality issues - excessive GPS errors")
-        print("\n  Suggested fixes:")
-        print(f"    - Increase eps (current: {eps_meters:.1f}m)")
-        print(f"    - Decrease min_samples (current: {min_samples})")
-        print("    - Increase sample_fraction to include more data")
-        print("    - Lower speed_threshold to include more points")
-        print("=" * 60)
-        raise ValueError("DBSCAN clustering failed: No valid clusters found. Cannot proceed.")
+    # if len(cluster_centers) == 0:
+    #     print("\n" + "=" * 60)
+    #     print("✗ DBSCAN CLUSTERING FAILED")
+    #     print("=" * 60)
+    #     print("  No valid clusters were found by the DBSCAN algorithm.")
+    #     print("\n  Possible causes:")
+    #     print("    1. eps is too small - points are too far apart for given radius")
+    #     print("    2. min_samples is too high - not enough dense regions")
+    #     print("    3. Data is too sparse - no natural dense groupings exist")
+    #     print("    4. Data quality issues - excessive GPS errors")
+    #     print("\n  Suggested fixes:")
+    #     print(f"    - Increase eps (current: {eps_meters:.1f}m)")
+    #     print(f"    - Decrease min_samples (current: {min_samples})")
+    #     print("    - Increase sample_fraction to include more data")
+    #     print("    - Lower speed_threshold to include more points")
+    #     print("=" * 60)
+    #     raise ValueError("DBSCAN clustering failed: No valid clusters found. Cannot proceed.")
 
     cluster_centers = np.array(cluster_centers)
 
-    # =========================================================================
-    # STEP 10: Print Summary Statistics
-    # =========================================================================
     print(f"\n{'='*60}")
     print(f"DBSCAN CLUSTERING SUMMARY")
     print(f"{'='*60}")
@@ -421,21 +381,6 @@ def simple_clustering(df, speed_threshold=2.0):
 
 
 def event_driven_clustering_fixed(df, known_stops=None):
-    """
-    Adapter: DBSCAN-based clustering via `simple_clustering`.
-
-    Returns the same two-value tuple expected by the rest of the pipeline:
-        cluster_centers     : np.ndarray  shape (N, 2)  — [lat, lon] per cluster
-        station_cluster_ids : set of int  — always empty; DBSCAN does not
-                              distinguish station vs delay clusters.
-
-    The `known_stops` argument is accepted for API compatibility but is not
-    used by DBSCAN — the algorithm discovers cluster locations automatically
-    from data density without requiring named anchor points.
-
-    eps is determined via the k-distance elbow method — the cluster count
-    emerges naturally from the data's density structure.
-    """
     print_section("EVENT-DRIVEN CLUSTERING  (DBSCAN adapter)")
 
     if known_stops:
@@ -444,17 +389,9 @@ def event_driven_clustering_fixed(df, known_stops=None):
 
     cluster_centers, cluster_info = simple_clustering(df)
 
-    # Empty set: DBSCAN does not pre-label any cluster as a named station.
-    # Downstream MAGNN code that checks station_cluster_ids still runs
-    # correctly — it simply won't highlight any cluster as a known station.
     station_cluster_ids = set()
 
     print(f"   DBSCAN clusters produced : {len(cluster_centers)}")
     print(f"   Station cluster IDs      : {station_cluster_ids} (none labelled by DBSCAN)")
 
     return cluster_centers, station_cluster_ids
-
-
-# =============================================================================
-# SEGMENT BUILDING - CORRECTED VERSION
-# =============================================================================

@@ -23,10 +23,6 @@ warnings.filterwarnings('ignore')
 
 from config import print_section, haversine_meters
 
-# =============================================================================
-# KNN GRAPH CLUSTERING
-# =============================================================================
-
 def simple_clustering(df, speed_threshold=2.0, known_stops=None, station_exclusion_radius_m=300):
     """
     Cluster transit stops using K-Nearest Neighbors (KNN) graph-based clustering.
@@ -95,9 +91,6 @@ def simple_clustering(df, speed_threshold=2.0, known_stops=None, station_exclusi
 
     print_section("STEP 2: CLUSTERING STOPS/STATIONS (KNN GRAPH)")
 
-    # =========================================================================
-    # STEP 1: Input Validation
-    # =========================================================================
     if df.empty:
         print("✗ Empty DataFrame provided")
         return np.empty((0, 2)), {}
@@ -108,9 +101,6 @@ def simple_clustering(df, speed_threshold=2.0, known_stops=None, station_exclusi
         print(f"✗ Missing required columns: {missing_cols}")
         return np.empty((0, 2)), {}
 
-    # =========================================================================
-    # STEP 2: Filter Low-Speed Points (Potential Stops)
-    # =========================================================================
     if 'speed_mps' in df.columns:
         stops = df[df['speed_mps'] < speed_threshold].copy()
         print(f"✓ Found {len(stops):,} low-speed points (< {speed_threshold} m/s)")
@@ -118,9 +108,6 @@ def simple_clustering(df, speed_threshold=2.0, known_stops=None, station_exclusi
         stops = df.copy()
         print(f"⚠️  No 'speed_mps' column - using all {len(stops):,} points")
 
-    # =========================================================================
-    # STEP 3: Extract and Validate Coordinates
-    # =========================================================================
     coords = stops[['latitude', 'longitude']].dropna()
 
     if coords.empty:
@@ -129,9 +116,6 @@ def simple_clustering(df, speed_threshold=2.0, known_stops=None, station_exclusi
 
     coords = coords[(coords['latitude'] != 0) & (coords['longitude'] != 0)].copy()
 
-    # =========================================================================
-    # STEP 4: Remove Statistical Outliers
-    # =========================================================================
     lat_mean, lat_std = coords['latitude'].mean(), coords['latitude'].std()
     lon_mean, lon_std = coords['longitude'].mean(), coords['longitude'].std()
 
@@ -145,15 +129,6 @@ def simple_clustering(df, speed_threshold=2.0, known_stops=None, station_exclusi
         print(f"✗ Too few valid coordinates ({len(coords)}) after filtering")
         return np.empty((0, 2)), {}
 
-    # =========================================================================
-    # STEP 4b: Exclude points near known stations
-    #
-    # Low-speed points concentrate heavily AT stations (trains stop there).
-    # If we leave them in, KNN rediscovers the stations instead of finding
-    # delay clusters between them.  We remove any point within
-    # station_exclusion_radius_m of a known station so the algorithm only
-    # sees inter-station delay / congestion locations.
-    # =========================================================================
     if known_stops:
         station_coords = [
             (lat, lon)
@@ -161,10 +136,9 @@ def simple_clustering(df, speed_threshold=2.0, known_stops=None, station_exclusi
             if not (np.isnan(lat) or np.isnan(lon))
         ]
         if station_coords:
-            station_arr = np.array(station_coords)   # shape (S, 2)
+            station_arr = np.array(station_coords)
             coord_arr   = coords[['latitude', 'longitude']].values
 
-            # Vectorised: for each GPS point check distance to every station
             keep_mask = np.ones(len(coord_arr), dtype=bool)
             for s_lat, s_lon in station_arr:
                 dists = np.array([
@@ -185,9 +159,6 @@ def simple_clustering(df, speed_threshold=2.0, known_stops=None, station_exclusi
 
     print(f"✓ Using {len(coords):,} valid coordinates for clustering")
 
-    # =========================================================================
-    # STEP 5: Calculate Optimal K for KNN (DENSITY-ADAPTIVE)
-    # =========================================================================
     n_points = len(coords)
     coord_values = coords[['latitude', 'longitude']].values
     coords_radians = np.radians(coord_values)
@@ -246,9 +217,6 @@ def simple_clustering(df, speed_threshold=2.0, known_stops=None, station_exclusi
     print(f"  Cluster count: data-driven (no target)")
     print(f"{'='*60}")
 
-    # =========================================================================
-    # STEP 6: Build KNN Graph Using BallTree
-    # =========================================================================
     coord_values = coords[['latitude', 'longitude']].values
     coords_radians = np.radians(coord_values)
 
@@ -264,10 +232,6 @@ def simple_clustering(df, speed_threshold=2.0, known_stops=None, station_exclusi
     distances_meters = distances * 6_371_000
     print(f"  Average neighbor distance: {distances_meters[:, 1:].mean():.1f}m")
     print(f"  Max neighbor distance: {distances_meters[:, 1:].max():.1f}m")
-
-    # =========================================================================
-    # STEP 7: Create Mutual KNN Adjacency Matrix
-    # =========================================================================
     print(f"✓ Creating mutual KNN adjacency matrix...")
 
     adjacency = lil_matrix((n_points, n_points), dtype=np.float32)
@@ -287,10 +251,6 @@ def simple_clustering(df, speed_threshold=2.0, known_stops=None, station_exclusi
 
     print(f"  Mutual KNN edges created: {n_edges:,}")
     print(f"  Graph density: {graph_density:.2f}%")
-
-    # =========================================================================
-    # STEP 8: Find Connected Components
-    # =========================================================================
     print(f"✓ Finding connected components...")
 
     n_components, labels = connected_components(
@@ -301,13 +261,6 @@ def simple_clustering(df, speed_threshold=2.0, known_stops=None, station_exclusi
 
     print(f"  Initial connected components found: {n_components}")
 
-    # =========================================================================
-    # STEP 9: Calculate component centres, filtering micro-components
-    #
-    # We use a fixed minimum size threshold to filter out genuine noise
-    # (isolated 1-2 GPS pings with no real neighbours).  The cluster count
-    # emerges naturally from the data's connectivity — no target needed.
-    # =========================================================================
     min_component_size = max(3, n_points // 1000)
     print(f"  Dynamic min component size: {min_component_size} points")
 
@@ -326,9 +279,6 @@ def simple_clustering(df, speed_threshold=2.0, known_stops=None, station_exclusi
     print(f"  Components kept (>= {min_component_size} pts): {n_components_kept}")
     print(f"  Components discarded as noise : {n_components - n_components_kept}")
 
-    # =========================================================================
-    # STEP 10: Validate
-    # =========================================================================
     if n_components_kept == 0:
         print("\n" + "=" * 60)
         print("\u2717 KNN CLUSTERING FAILED")
@@ -349,15 +299,6 @@ def simple_clustering(df, speed_threshold=2.0, known_stops=None, station_exclusi
     component_centers = np.array(component_centers)   # shape (m, 2)
     component_sizes   = np.array(component_sizes)
 
-    # =========================================================================
-    # STEP 11: Build final cluster list directly from surviving components
-    #
-    # No agglomerative merging — KNN's strength is finding natural data
-    # structure.  Forcing a target cluster count via merging can combine
-    # geographically distant clusters and defeats the purpose of using a
-    # data-driven method.  The cluster count is whatever the connectivity
-    # structure produces after noise filtering.
-    # =========================================================================
     cluster_centers = []
     cluster_info    = {}
 
@@ -374,10 +315,6 @@ def simple_clustering(df, speed_threshold=2.0, known_stops=None, station_exclusi
 
     cluster_centers = np.array(cluster_centers)
     print(f"  Natural cluster count: {len(cluster_centers)}")
-
-    # =========================================================================
-    # STEP 12: Print Summary Statistics
-    # =========================================================================
     print(f"\n{'='*60}")
     print(f"KNN GRAPH CLUSTERING SUMMARY")
     print(f"{'='*60}")
@@ -406,28 +343,9 @@ def simple_clustering(df, speed_threshold=2.0, known_stops=None, station_exclusi
 
 
 def event_driven_clustering_fixed(df, known_stops=None):
-    """
-    Adapter: replaces HDBSCAN-based clustering with KNN-based clustering.
-
-    Known stops injection
-    ---------------------
-    Every entry in `known_stops` (dict: station_name -> (lat, lon)) is
-    ALWAYS included as a cluster centre, prepended at indices 0...n_stations-1,
-    matching the HDBSCAN module's guarantee.  Any KNN cluster whose centroid
-    falls within 300 m of a known station is dropped (station takes over).
-
-    Returns
-    -------
-    cluster_centers     : np.ndarray  shape (N, 2)  -- [lat, lon] per cluster
-    station_cluster_ids : set of int  -- indices that correspond to real stations
-    """
     print_section("EVENT-DRIVEN CLUSTERING  (KNN adapter)")
 
-    MERGE_RADIUS_M = 300  # same radius as HDBSCAN module
-
-    # ------------------------------------------------------------------
-    # 1. Build station array from known_stops
-    # ------------------------------------------------------------------
+    MERGE_RADIUS_M = 300
     station_centers = []
     if known_stops:
         for name, (lat, lon) in known_stops.items():
@@ -437,16 +355,9 @@ def event_driven_clustering_fixed(df, known_stops=None):
     else:
         print("   No known_stops provided -- clusters are fully data-driven.")
 
-    # ------------------------------------------------------------------
-    # 2. KNN clustering on the full dataframe
-    # ------------------------------------------------------------------
     knn_centers, _ = simple_clustering(df,
                                        known_stops=known_stops,
                                        station_exclusion_radius_m=MERGE_RADIUS_M)
-
-    # ------------------------------------------------------------------
-    # 3. Drop any KNN cluster within MERGE_RADIUS_M of a known station
-    # ------------------------------------------------------------------
     filtered_knn = []
     for kc in knn_centers:
         too_close = any(
@@ -460,9 +371,6 @@ def event_driven_clustering_fixed(df, known_stops=None):
     if dropped:
         print(f"   Dropped {dropped} KNN cluster(s) absorbed by station zones")
 
-    # ------------------------------------------------------------------
-    # 4. Assemble: stations first (indices 0...n-1), then KNN delay clusters
-    # ------------------------------------------------------------------
     final_centers = []
     station_cluster_ids = set()
 
@@ -480,8 +388,3 @@ def event_driven_clustering_fixed(df, known_stops=None):
     print(f"   Total clusters    : {len(cluster_centers)}")
 
     return cluster_centers, station_cluster_ids
-
-
-# =============================================================================
-# SEGMENT BUILDING - CORRECTED VERSION
-# =============================================================================

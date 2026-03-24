@@ -22,10 +22,6 @@ warnings.filterwarnings('ignore')
 
 from config import print_section, haversine_meters
 
-# =============================================================================
-# K-MEANS CLUSTERING
-# =============================================================================
-
 def simple_clustering(df, n_clusters=50, speed_threshold=2.0):
     """
     Cluster transit stops using K-Means algorithm.
@@ -120,9 +116,6 @@ def simple_clustering(df, n_clusters=50, speed_threshold=2.0):
     """
     print_section("STEP 2: CLUSTERING STOPS/STATIONS (K-MEANS)")
 
-    # =========================================================================
-    # STEP 1: Input Validation
-    # =========================================================================
     if df.empty:
         print("✗ Empty DataFrame provided")
         return np.empty((0, 2)), {}
@@ -133,12 +126,6 @@ def simple_clustering(df, n_clusters=50, speed_threshold=2.0):
         print(f"✗ Missing required columns: {missing_cols}")
         return np.empty((0, 2)), {}
 
-    # =========================================================================
-    # STEP 2: Filter Low-Speed Points (Potential Stops)
-    # =========================================================================
-    # Rationale: Low-speed points indicate where vehicles stop or slow down,
-    # which typically corresponds to stations, stops, or traffic signals.
-    # Default threshold of 2.0 m/s (~7.2 km/h) captures most stop events.
     if 'speed_mps' in df.columns:
         stops = df[df['speed_mps'] < speed_threshold]
         print(f"✓ Found {len(stops):,} low-speed points (< {speed_threshold} m/s)")
@@ -146,23 +133,14 @@ def simple_clustering(df, n_clusters=50, speed_threshold=2.0):
         stops = df
         print(f"⚠️  No 'speed_mps' column - using all {len(stops):,} points")
 
-    # =========================================================================
-    # STEP 3: Extract and Validate Coordinates
-    # =========================================================================
     coords = stops[['latitude', 'longitude']].dropna()
 
     if coords.empty:
         print("✗ No valid coordinates found")
         return np.empty((0, 2)), {}
 
-    # Filter invalid coordinates (0,0 is "null island" - indicates invalid GPS)
     coords = coords[(coords['latitude'] != 0) & (coords['longitude'] != 0)]
 
-    # =========================================================================
-    # STEP 4: Remove Statistical Outliers
-    # =========================================================================
-    # Rationale: GPS errors can create points far from the actual route.
-    # Using 3 standard deviations captures 99.7% of valid data points.
     lat_mean, lat_std = coords['latitude'].mean(), coords['latitude'].std()
     lon_mean, lon_std = coords['longitude'].mean(), coords['longitude'].std()
 
@@ -178,13 +156,9 @@ def simple_clustering(df, n_clusters=50, speed_threshold=2.0):
 
     print(f"✓ Using {len(coords):,} valid coordinates for clustering")
 
-    # =========================================================================
-    # STEP 5: Prepare Data and Adjust Parameters
-    # =========================================================================
     coord_values = coords[['latitude', 'longitude']].values
     n_points = len(coord_values)
 
-    # Adjust n_clusters if necessary (can't have more clusters than points/2)
     actual_n_clusters = min(n_clusters, n_points // 2)
     if actual_n_clusters != n_clusters:
         print(f"⚠️  Adjusted n_clusters from {n_clusters} to {actual_n_clusters} (data size constraint)")
@@ -198,58 +172,41 @@ def simple_clustering(df, n_clusters=50, speed_threshold=2.0):
     print(f"  n_init: 3 (reduced from 10 — k-means++ gives stable seeds)")
     print(f"  algorithm: 'lloyd' (classic k-means)")
     print(f"{'='*60}")
-
-    # =========================================================================
-    # STEP 6: Fit K-Means Model
-    # =========================================================================
     print(f"\n✓ Running K-Means clustering...")
 
     kmeans = KMeans(
         n_clusters=actual_n_clusters,
-        init='k-means++',       # Smart initialization for better convergence
-        max_iter=300,           # Maximum iterations per run
-        n_init=3,               # 3 restarts — sufficient with k-means++ seeding
-        algorithm='lloyd',      # Classic K-Means algorithm
-        random_state=42         # Reproducibility
+        init='k-means++',
+        max_iter=300,
+        n_init=3,
+        algorithm='lloyd',
+        random_state=42
     )
 
-    # Fit the model and get cluster assignments
     cluster_labels = kmeans.fit_predict(coord_values)
-
-    # Extract cluster centers (centroids)
     cluster_centers = kmeans.cluster_centers_
 
-    # =========================================================================
-    # STEP 7: Analyze K-Means Results
-    # =========================================================================
     print(f"\n  K-Means Results:")
     print(f"    Converged: {kmeans.n_iter_ < 300}")
     print(f"    Iterations: {kmeans.n_iter_}")
     print(f"    Inertia (within-cluster variance): {kmeans.inertia_:.4f}")
 
-    # =========================================================================
-    # STEP 8: Build Cluster Information Dictionary (VECTORIZED)
-    # =========================================================================
-    # --- Vectorized distances: each point vs its own assigned centroid ---
     all_distances = np.sqrt(
         (coord_values[:, 0] - cluster_centers[cluster_labels, 0]) ** 2 +
         (coord_values[:, 1] - cluster_centers[cluster_labels, 1]) ** 2
     )
 
-    # --- Aggregate counts and mean distances with bincount ---
     n_clusters_actual = len(cluster_centers)
     sizes     = np.bincount(cluster_labels, minlength=n_clusters_actual)
     dist_sums = np.bincount(cluster_labels, weights=all_distances, minlength=n_clusters_actual)
     avg_dists = np.where(sizes > 0, dist_sums / sizes, 0.0)
 
-    # --- Radius (max distance per cluster) ---
     sort_idx = np.argsort(cluster_labels, kind='stable')
     sorted_dists = all_distances[sort_idx]
     boundaries = np.searchsorted(cluster_labels[sort_idx], np.arange(n_clusters_actual))
     radii = np.maximum.reduceat(sorted_dists, boundaries)
     radii = np.where(sizes > 0, radii, 0.0)
 
-    # --- Build cluster_info dict ---
     cluster_info = {
         i: {
             'center': (float(cluster_centers[i, 0]), float(cluster_centers[i, 1])),
@@ -261,28 +218,22 @@ def simple_clustering(df, n_clusters=50, speed_threshold=2.0):
         for i in range(n_clusters_actual)
     }
 
-    # =========================================================================
-    # STEP 9: Validate Clustering Results
-    # =========================================================================
-    if len(cluster_centers) == 0:
-        print("\n" + "=" * 60)
-        print("✗ K-MEANS CLUSTERING FAILED")
-        print("=" * 60)
-        print("  No valid clusters were found by the K-Means algorithm.")
-        print("\n  Possible causes:")
-        print("    1. n_clusters is too high for the data size")
-        print("    2. Data has insufficient variance")
-        print("    3. All points are identical or nearly identical")
-        print("\n  Suggested fixes:")
-        print(f"    - Decrease n_clusters (current: {actual_n_clusters})")
-        print("    - Increase sample_fraction to include more data")
-        print("    - Check data quality")
-        print("=" * 60)
-        raise ValueError("K-Means clustering failed: No valid clusters found. Cannot proceed.")
+    # if len(cluster_centers) == 0:
+    #     print("\n" + "=" * 60)
+    #     print("✗ K-MEANS CLUSTERING FAILED")
+    #     print("=" * 60)
+    #     print("  No valid clusters were found by the K-Means algorithm.")
+    #     print("\n  Possible causes:")
+    #     print("    1. n_clusters is too high for the data size")
+    #     print("    2. Data has insufficient variance")
+    #     print("    3. All points are identical or nearly identical")
+    #     print("\n  Suggested fixes:")
+    #     print(f"    - Decrease n_clusters (current: {actual_n_clusters})")
+    #     print("    - Increase sample_fraction to include more data")
+    #     print("    - Check data quality")
+    #     print("=" * 60)
+    #     raise ValueError("K-Means clustering failed: No valid clusters found. Cannot proceed.")
 
-    # =========================================================================
-    # STEP 10: Print Summary Statistics
-    # =========================================================================
     print(f"\n{'='*60}")
     print(f"K-MEANS CLUSTERING SUMMARY")
     print(f"{'='*60}")
@@ -324,22 +275,7 @@ def simple_clustering(df, n_clusters=50, speed_threshold=2.0):
 
     return cluster_centers, cluster_info
 
-
-
 def event_driven_clustering_fixed(df, known_stops=None, n_clusters=50):
-    """
-    Adapter: replaces HDBSCAN-based clustering with K-Means-based clustering
-    via `simple_clustering`.
-
-    Returns the same two-value tuple expected by the rest of the pipeline:
-        cluster_centers     : np.ndarray  shape (N, 2)  — [lat, lon] per cluster
-        station_cluster_ids : set of int  — always empty; K-Means does not
-                              distinguish station vs delay clusters.
-
-    The `known_stops` argument is accepted for API compatibility but is not
-    used by K-Means — the algorithm discovers cluster locations by minimising
-    within-cluster variance directly from the GPS data.
-    """
     print_section("EVENT-DRIVEN CLUSTERING  (K-Means adapter)")
 
     if known_stops:
@@ -347,19 +283,9 @@ def event_driven_clustering_fixed(df, known_stops=None, n_clusters=50):
               f"but not used — K-Means is fully data-driven.")
 
     cluster_centers, cluster_info = simple_clustering(df, n_clusters=n_clusters)
-
-    # Empty set: K-Means does not pre-label any cluster as a named station.
-    # Downstream MAGNN code that checks station_cluster_ids still runs
-    # correctly — it simply won't highlight any cluster as a known station.
     station_cluster_ids = set()
 
     print(f"   K-Means clusters produced : {len(cluster_centers)}")
     print(f"   Station cluster IDs       : {station_cluster_ids} (none labelled by K-Means)")
 
     return cluster_centers, station_cluster_ids
-
-
-# =============================================================================
-# SEGMENT BUILDING - CORRECTED VERSION
-# =============================================================================
-
