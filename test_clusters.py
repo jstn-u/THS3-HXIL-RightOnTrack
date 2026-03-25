@@ -39,20 +39,11 @@ from segments import build_segments_fixed, build_adjacency_matrices_fixed
 from visualizations import plot_clusters, plot_segments, plot_segment_statistics
 from model import (SegmentDataset, masked_collate_fn, train_magtte)
 
-# ============================================================================
-# SWEEP SETTINGS
-# ============================================================================
-# CLUSTER_SIZES = [50, 100, 150]
-CLUSTER_SIZES = [100, 150]
+CLUSTER_SIZES = [20, 30, 35, 40, 45, 50, 100, 150]
 ALGORITHMS = ['gmm', 'kmeans']
 
 
 def run_single_experiment(method, n_clusters, config, run_folder):
-    """
-    Run one full pipeline: cluster → segment → train → evaluate.
-
-    Returns a dict with metrics, or None if the run failed.
-    """
     experiment_start = time.time()
 
     module = importlib.import_module(f'cluster_{method}')
@@ -65,15 +56,12 @@ def run_single_experiment(method, n_clusters, config, run_folder):
     print_section(f"EXPERIMENT: {algo_name}  |  n_clusters = {n_clusters}")
     print(f"  📁 Output: {output_folder}")
 
-    # ------------------------------------------------------------------
-    # 1. Load data
-    # ------------------------------------------------------------------
     train_df, test_df, val_df = load_train_test_val_data_fixed(
         data_folder=config.data_folder,
         sample_fraction=config.sample_fraction,
     )
     if len(train_df) == 0:
-        print("❌ No training data")
+        print("No training data")
         return None
 
     known_stops_train = get_known_stops(train_df)
@@ -81,30 +69,21 @@ def run_single_experiment(method, n_clusters, config, run_folder):
     known_stops_val   = get_known_stops(val_df)
     known_stops = {**known_stops_test, **known_stops_val, **known_stops_train}
 
-    # ------------------------------------------------------------------
-    # 2. Clustering — pass the n_clusters size being tested
-    # ------------------------------------------------------------------
     clusters, station_cluster_ids = event_driven_clustering_fixed(
         train_df, known_stops=known_stops, n_clusters=n_clusters,
     )
     if len(clusters) == 0:
-        print("❌ No clusters produced")
+        print("No clusters produced")
         return None
 
-    # ------------------------------------------------------------------
-    # 3. Build segments
-    # ------------------------------------------------------------------
     train_segments = build_segments_fixed(train_df, clusters)
     if len(train_segments) == 0:
-        print("❌ No segments")
+        print("No segments")
         return None
 
     test_segments = build_segments_fixed(test_df, clusters)
     val_segments  = build_segments_fixed(val_df, clusters)
 
-    # ------------------------------------------------------------------
-    # 4. Visualisations
-    # ------------------------------------------------------------------
     plot_clusters(clusters, {},
                   algorithm_name=algo_name,
                   save_path=os.path.join(output_folder,
@@ -118,19 +97,13 @@ def run_single_experiment(method, n_clusters, config, run_folder):
                             save_path=os.path.join(output_folder,
                                                     f'{algo_name.lower()}-segment_stats.png'))
 
-    # ------------------------------------------------------------------
-    # 5. Adjacency matrices
-    # ------------------------------------------------------------------
     adj_geo, adj_dist, adj_soc, segment_types = build_adjacency_matrices_fixed(
         train_segments, clusters, known_stops=known_stops,
     )
     if adj_geo is None:
-        print("❌ Adjacency failed")
+        print("Adjacency failed")
         return None
 
-    # ------------------------------------------------------------------
-    # 6. Datasets & data-loaders
-    # ------------------------------------------------------------------
     train_dataset = SegmentDataset(train_segments, segment_types,
                                    fit_scalers=True)
     val_dataset = SegmentDataset(val_segments, segment_types,
@@ -152,18 +125,15 @@ def run_single_experiment(method, n_clusters, config, run_folder):
                              shuffle=False, num_workers=0,
                              collate_fn=masked_collate_fn)
 
-    print(f"\n📊  Data — segments: {len(segment_types)}  |  "
+    print(f"\nData — segments: {len(segment_types)}  |  "
           f"train: {len(train_dataset):,}  |  "
           f"val: {len(val_dataset):,}  |  "
           f"test: {len(test_dataset):,}")
 
     if len(train_loader) == 0:
-        print("❌ Training loader is empty")
+        print("Training loader is empty")
         return None
 
-    # ------------------------------------------------------------------
-    # 7. MAGTTE training
-    # ------------------------------------------------------------------
     results, _ = train_magtte(
         train_loader, val_loader, test_loader,
         adj_geo, adj_dist, adj_soc,
@@ -171,9 +141,6 @@ def run_single_experiment(method, n_clusters, config, run_folder):
         output_folder, DEVICE, config,
     )
 
-    # ------------------------------------------------------------------
-    # 8. Save metrics.json (per-run, same format as main.py)
-    # ------------------------------------------------------------------
     elapsed_seconds = time.time() - experiment_start
     elapsed_minutes = elapsed_seconds / 60
     elapsed_formatted = f"{int(elapsed_minutes)}m {int(elapsed_seconds % 60)}s"
@@ -216,9 +183,6 @@ def run_single_experiment(method, n_clusters, config, run_folder):
         json.dump(metrics_out, f, indent=2)
     print(f"\n✓ Metrics saved → {json_path}")
 
-    # ------------------------------------------------------------------
-    # 9. Collect row for aggregate CSV
-    # ------------------------------------------------------------------
     row = {
         'algorithm':      algo_name,
         'cluster_count':  n_clusters,
@@ -247,11 +211,6 @@ def run_single_experiment(method, n_clusters, config, run_folder):
 
     return row
 
-
-# ============================================================================
-# MAIN SWEEP
-# ============================================================================
-
 def _next_run_number():
     """Find the next available test_clusters_run<N> number inside outputs/."""
     os.makedirs('outputs', exist_ok=True)
@@ -270,15 +229,12 @@ def _next_run_number():
 
 def main():
     config = Config()
-
-    # Optional CLI arg: sample fraction
     for arg in sys.argv[1:]:
         try:
             config.sample_fraction = float(arg)
         except ValueError:
-            print(f"⚠️  Unknown argument '{arg}' — ignored")
+            print(f"⚠Unknown argument '{arg}' — ignored")
 
-    # Create the parent folder for this sweep
     run_num = _next_run_number()
     run_folder = f"outputs/test_clusters_run{run_num}"
     os.makedirs(run_folder, exist_ok=True)
@@ -312,17 +268,14 @@ def main():
                 if row is not None:
                     all_rows.append(row)
                 else:
-                    print(f"⚠️  Run failed (returned None)")
+                    print(f"Run failed (returned None)")
             except Exception as e:
-                print(f"❌ Exception during {method.upper()} k={n_clusters}: {e}")
+                print(f"Exception during {method.upper()} k={n_clusters}: {e}")
                 import traceback
                 traceback.print_exc()
 
-    # ======================================================================
-    # SAVE RESULTS
-    # ======================================================================
     if not all_rows:
-        print("\n❌ No successful runs — nothing to save.")
+        print("\nNo successful runs — nothing to save.")
         return
 
     # CSV column order
@@ -341,9 +294,6 @@ def main():
         writer.writeheader()
         writer.writerows(all_rows)
 
-    # ------------------------------------------------------------------
-    # Pretty-print the results table
-    # ------------------------------------------------------------------
     print_section("CLUSTER SWEEP RESULTS")
 
     header = f"{'Algorithm':<10} {'Clusters':>8} {'Train R²':>9} {'Val R²':>9} " \
@@ -362,12 +312,7 @@ def main():
         print(f"{row['algorithm']:<10} {row['cluster_count']:>8} {tr2:>9} "
               f"{vr2:>9} {ter2:>9} {rmse:>10} {mae:>9} {mape:>10} {dur:>10}")
 
-    # ------------------------------------------------------------------
-    # Determine the best cluster count per algorithm
-    # ------------------------------------------------------------------
     print_section("BEST CLUSTER SIZE PER ALGORITHM")
-
-    # We rank by Test R² (higher is better). If R² is tied, lower RMSE wins.
     best_per_algo = {}
     for row in all_rows:
         algo = row['algorithm']
@@ -377,7 +322,6 @@ def main():
             best_per_algo[algo] = row
         else:
             current_best = best_per_algo[algo]
-            # Higher R² is better; tie-break on lower RMSE
             if (row['Test_R2'] > current_best['Test_R2']) or \
                (row['Test_R2'] == current_best['Test_R2'] and
                 row['Test_RMSE'] < current_best['Test_RMSE']):
@@ -391,9 +335,6 @@ def main():
         print(f"       Test MAPE = {best['Test_MAPE']:.2f}%")
         print(f"       Duration  = {best.get('duration', 'N/A')}")
 
-    # ------------------------------------------------------------------
-    # Save best-per-algorithm summary to JSON
-    # ------------------------------------------------------------------
     best_json = {
         'title': 'BEST CLUSTER SIZE PER ALGORITHM',
         'ranking_criteria': 'Test R² (higher is better), tie-break on Test RMSE (lower is better)',
@@ -419,8 +360,8 @@ def main():
     with open(output_json, 'w') as f:
         json.dump(best_json, f, indent=2)
 
-    print(f"\n✅ CSV results saved to : {output_csv}")
-    print(f"✅ Best metrics saved to: {output_json}")
+    print(f"\nCSV results saved to : {output_csv}")
+    print(f"Best metrics saved to: {output_json}")
 
 
 if __name__ == '__main__':

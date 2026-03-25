@@ -22,28 +22,13 @@ from config import print_section
 
 warnings.filterwarnings('ignore')
 
-# =============================================================================
-# VISUALISATION FUNCTIONS
-# =============================================================================
 
 def plot_clusters(cluster_centers, cluster_info, algorithm_name='HDBSCAN', save_path='clusters_plot.png'):
-    """
-    Visualise cluster locations on a geographic map with CartoDB basemap.
-    Falls back to a plain lat/lon plot if basemap cannot be loaded.
-
-    Parameters
-    ----------
-    algorithm_name : str
-        Name of the clustering algorithm (e.g. 'HDBSCAN', 'KNN', 'DBSCAN').
-        Used in all plot titles, labels, and print messages.
-    """
     print_section(f"VISUALISING {algorithm_name.upper()} CLUSTERS")
 
     if len(cluster_centers) == 0:
         print("✗ No clusters to visualise")
         return
-
-    # Hardcoded Canberra light rail stations for reference
     stations_data = {
         'GGN': ('Gungahlin Place',        -35.185639, 149.135481),
         'MCK': ('Manning Clark Crescent', -35.186986, 149.143372),
@@ -122,10 +107,10 @@ def plot_clusters(cluster_centers, cluster_info, algorithm_name='HDBSCAN', save_
                                   edgecolor='red', linewidth=2, alpha=0.95),
                         zorder=11)
 
-        print("✓ Geographic basemap added successfully")
+        print("Geographic basemap added successfully")
 
     except Exception as e:
-        print(f"⚠️  Could not load basemap (using simple plot): {e}")
+        print(f"Could not load basemap (using simple plot): {e}")
         ax.clear()
 
         station_lats  = [d[1] for d in stations_data.values()]
@@ -187,19 +172,8 @@ def plot_clusters(cluster_centers, cluster_info, algorithm_name='HDBSCAN', save_
     print(f"✓ Saved {algorithm_name} cluster plot to: {save_path}")
     plt.close()
 
-
-
 def plot_segments(segments_df, cluster_centers, max_segments=100,
                   algorithm_name='HDBSCAN', save_path='segments_plot.png'):
-    """
-    Two-panel figure: full view and 60%-zoom magnified view of segment connections.
-    Line width and opacity scale with segment frequency.
-
-    Parameters
-    ----------
-    algorithm_name : str
-        Name of the clustering algorithm. Used in titles and print messages.
-    """
     print_section(f"VISUALISING {algorithm_name.upper()} SEGMENTS")
 
     if segments_df is None or len(segments_df) == 0 or len(cluster_centers) == 0:
@@ -268,18 +242,7 @@ def plot_segments(segments_df, cluster_centers, max_segments=100,
     print(f"✓ Saved {algorithm_name} segments plot to: {save_path}")
     plt.close()
 
-
-
 def plot_segment_statistics(segments_df, algorithm_name='HDBSCAN', save_path='segment_stats.png'):
-    """
-    2×2 grid: travel-time histogram, distance histogram, speed histogram,
-    and a horizontal bar chart of the top-20 most-frequent segment connections.
-
-    Parameters
-    ----------
-    algorithm_name : str
-        Name of the clustering algorithm. Used in titles and print messages.
-    """
     print_section(f"VISUALISING {algorithm_name.upper()} SEGMENT STATISTICS")
 
     if segments_df is None or len(segments_df) == 0:
