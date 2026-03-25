@@ -2,11 +2,10 @@
 main.py
 =======
 Entry point for MAGNN-LSTM transit travel time prediction.
-
-✅ THREE MODEL COMPARISON:
-   1. MAGNN (baseline)
-   2. MAGNN-LSTM-Residual (fixed version with residual learning + adaptive gating)
-   3. MAGNN-LSTM-DualTaskMTL (✅ NEW: Local segments + Global stations)
+THREE MODEL COMPARISON:
+   1. MAGNN
+   2. MAGNN-LSTM-Residual
+   3. MAGNN-LSTM-DualTaskMTL
 
 Usage:
     python main.py                      # defaults (sample from config, hdbscan)
@@ -21,18 +20,14 @@ Supported clustering methods: hdbscan, dbscan, knn, gmm, kmeans
 Both sample_fraction and method are optional and can appear in any order.
 """
 
-# =============================================================================
-# DYNAMIC CLUSTERING — resolved at runtime from CLI args
-# =============================================================================
 import sys
 import importlib
 
 VALID_METHODS = {'hdbscan', 'dbscan', 'knn', 'gmm', 'kmeans'}
 
-# --- Parse CLI args (sample fraction, clustering method, mode flag) ---
-_sample_fraction_cli = None          # None → use Config default
-_cluster_method = 'hdbscan'          # default clustering method
-_mode = None                         # None → baseline main()
+_sample_fraction_cli = None
+_cluster_method = 'hdbscan'
+_mode = None
 
 for _arg in sys.argv[1:]:
     if _arg in ('--compare-all', '--ablation'):
@@ -48,15 +43,11 @@ for _arg in sys.argv[1:]:
             print(f"   Valid flags:   --compare-all, --ablation")
             print(f"   Or pass a number for sample fraction (e.g. 0.1)")
 
-# Dynamically import the chosen clustering module
 _cluster_module = importlib.import_module(f'cluster_{_cluster_method}')
 event_driven_clustering_fixed = _cluster_module.event_driven_clustering_fixed
 
 ALGORITHM_NAME = _cluster_method.upper()
 
-# =============================================================================
-# SHARED MODULES
-# =============================================================================
 from config import Config, DEVICE, print_section, haversine_meters
 from data_loader import (load_data_fixed, load_train_test_val_data_fixed,
                          get_known_stops)
@@ -69,7 +60,7 @@ from model import (SegmentDataset, masked_collate_fn,
                    EnhancedSegmentDataset, enhanced_collate_fn,
                    PathDataset, path_collate_fn,
                    train_magnn_lstm_mtl,
-                   train_magnn_lstm_dualtask_mtl,  # ✅ NEW
+                   train_magnn_lstm_dualtask_mtl,
                    MAGTTE)
 from residual import MAGNN_LSTM_Residual
 
@@ -87,14 +78,7 @@ import torch
 
 warnings.filterwarnings('ignore')
 
-
-# =============================================================================
-# MAIN PIPELINE (BASELINE MAGNN ONLY)
-# =============================================================================
-
 def main():
-    """Main training loop - baseline MAGNN only."""
-
     config = Config()
 
     print_section("MAGNN TRAINING CONFIGURATION")
@@ -116,9 +100,6 @@ def main():
         print(f"📁 Output: {output_folder}")
 
         try:
-            # ------------------------------------------------------------------
-            # 1. Load data
-            # ------------------------------------------------------------------
             train_df, test_df, val_df = load_train_test_val_data_fixed(
                 data_folder=config.data_folder,
                 sample_fraction=config.sample_fraction
@@ -137,9 +118,6 @@ def main():
                   f"test={len(known_stops_test)}, "
                   f"val={len(known_stops_val)})")
 
-            # ------------------------------------------------------------------
-            # 2. Clustering
-            # ------------------------------------------------------------------
             clusters, station_cluster_ids = event_driven_clustering_fixed(
                 train_df, known_stops=known_stops
             )
@@ -147,9 +125,6 @@ def main():
                 print("❌ No clusters")
                 continue
 
-            # ------------------------------------------------------------------
-            # 3. Build segments
-            # ------------------------------------------------------------------
             train_segments = build_segments_fixed(train_df, clusters)
             if len(train_segments) == 0:
                 print("❌ No segments")
@@ -158,9 +133,6 @@ def main():
             test_segments = build_segments_fixed(test_df, clusters)
             val_segments = build_segments_fixed(val_df, clusters)
 
-            # ------------------------------------------------------------------
-            # 4. PLOTS
-            # ------------------------------------------------------------------
             print_section("GENERATING VISUALISATIONS")
 
             plot_clusters(clusters, {},
@@ -174,9 +146,6 @@ def main():
                                     save_path=os.path.join(output_folder,
                                                            f'{ALGORITHM_NAME.lower()}-segment_stats.png'))
 
-            # ------------------------------------------------------------------
-            # 5. Adjacency matrices
-            # ------------------------------------------------------------------
             adj_geo, adj_dist, adj_soc, segment_types = build_adjacency_matrices_fixed(
                 train_segments, clusters,
                 known_stops=known_stops
@@ -186,9 +155,6 @@ def main():
                 print("❌ Adjacency failed")
                 continue
 
-            # ------------------------------------------------------------------
-            # 6. Datasets & data loaders
-            # ------------------------------------------------------------------
             train_dataset = SegmentDataset(
                 train_segments, segment_types,
                 fit_scalers=True
@@ -234,9 +200,6 @@ def main():
                 print("❌ Training loader is empty — skipping")
                 continue
 
-            # ------------------------------------------------------------------
-            # 7. MAGTTE + GAT training
-            # ------------------------------------------------------------------
             results, _ = train_magtte(
                 train_loader, val_loader, test_loader,
                 adj_geo, adj_dist, adj_soc,
@@ -244,9 +207,6 @@ def main():
                 output_folder, DEVICE, config
             )
 
-            # ------------------------------------------------------------------
-            # 8. Save metrics JSON
-            # ------------------------------------------------------------------
             DATA_DRIVEN_METHODS = {'knn', 'hdbscan', 'dbscan'}
 
             metrics_config = {
@@ -294,19 +254,12 @@ def main():
             traceback.print_exc()
             continue
 
-
-# =============================================================================
-# RESIDUAL MODEL TRAINING FUNCTION
-# =============================================================================
-
 def train_magnn_lstm_residual(train_loader, val_loader, test_loader,
                               adj_geo, adj_dist, adj_soc,
                               segment_types, scaler,
                               output_folder, device, cfg,
                               pretrained_magnn_path=None,
                               freeze_magnn=True):
-    """Train MAGNN-LSTM-Residual with optimized hyperparameters."""
-
     print_section("MAGNN-LSTM-RESIDUAL TRAINING")
     num_segments = len(segment_types)
 
@@ -321,12 +274,12 @@ def train_magnn_lstm_residual(train_loader, val_loader, test_loader,
     model = MAGNN_LSTM_Residual(
         magnn_base,
         cfg.gat_hidden,
-        4,  # operational_dim
-        8,  # weather_dim
-        5,  # temporal_dim
-        128,  # lstm_hidden
-        1,  # lstm_layers
-        0.2,  # dropout
+        4,
+        8,
+        5,
+        128,
+        1,
+        0.2,
         freeze_magnn
     ).to(device)
 
@@ -342,7 +295,6 @@ def train_magnn_lstm_residual(train_loader, val_loader, test_loader,
         weight_decay=weight_decay
     )
 
-    print(f"   ✅ Optimization settings:")
     print(f"      Learning rate: {learning_rate}")
     print(f"      Weight decay: {weight_decay}")
 
@@ -529,12 +481,7 @@ def train_magnn_lstm_residual(train_loader, val_loader, test_loader,
     return results, model
 
 
-# =============================================================================
-# THREE-WAY COMPARISON HELPER
-# =============================================================================
-
 def print_three_way_comparison_table(magnn_results, residual_results, mtl_results, split_name):
-    """Print formatted three-way comparison table."""
 
     magnn_m = magnn_results.get(split_name, {})
     residual_m = residual_results.get(split_name, {})
@@ -605,13 +552,7 @@ def print_three_way_comparison_table(magnn_results, residual_results, mtl_result
 
     print(f"{'=' * 120}\n")
 
-
-# =============================================================================
-# THREE-WAY COMPARISON MODE (✅ UPDATED WITH DUALTASK MTL)
-# =============================================================================
-
 def main_with_three_way_comparison():
-    """Three-way comparison: MAGNN vs MAGNN-LSTM-Residual vs MAGNN-LSTM-DualTaskMTL"""
 
     config = Config()
 
@@ -619,14 +560,14 @@ def main_with_three_way_comparison():
     print(f"  Device: {DEVICE}")
     print(f"  Algorithm: {ALGORITHM_NAME}")
     print(f"\n  Models to compare:")
-    print(f"    1. MAGNN (baseline)")
-    print(f"    2. MAGNN-LSTM-Residual (residual learning + adaptive gate)")
-    print(f"    3. MAGNN-LSTM-DualTaskMTL (✅ NEW: Local + Global tasks)")
+    print(f"    1. MAGNN")
+    print(f"    2. MAGNN-LSTM-Residual")
+    print(f"    3. MAGNN-LSTM-DualTaskMTL")
     print(f"\n  DualTaskMTL features:")
-    print(f"    ✅ Uses segment-level data (45K+ samples, not 2K paths)")
-    print(f"    ✅ Local task: Predict individual segment durations")
-    print(f"    ✅ Global task: Predict total journey time")
-    print(f"    ✅ Uncertainty weighting: Auto-balance both tasks")
+    print(f"     Uses segment-level data (45K+ samples, not 2K paths)")
+    print(f"     Local task: Predict individual segment durations")
+    print(f"     Global task: Predict total journey time")
+    print(f"     Uncertainty weighting: Auto-balance both tasks")
     print("=" * 80)
 
     all_magnn_results = []
@@ -662,10 +603,6 @@ def main_with_three_way_comparison():
             test_segments = build_segments_fixed(test_df, clusters)
             val_segments = build_segments_fixed(val_df, clusters)
 
-            # ------------------------------------------------------------------
-            # [3b/10] Generate cluster / segment visualisations
-            #         (same helpers as normal main() — no pipeline changes)
-            # ------------------------------------------------------------------
             print("[3b/10] Generating visualisations...")
             plot_clusters(clusters, {},
                           algorithm_name=ALGORITHM_NAME,
@@ -749,8 +686,7 @@ def main_with_three_way_comparison():
             )
             all_residual_results.append(residual_results)
 
-            # ✅ NEW: DualTaskMTL using SEGMENT data (not paths!)
-            print("\n[9/10] Training MAGNN-LSTM-DualTaskMTL (Local + Global)...")
+             print("\n[9/10] Training MAGNN-LSTM-DualTaskMTL (Local + Global)...")
             print("-" * 80)
             mtl_results, mtl_model = train_magnn_lstm_dualtask_mtl(
                 train_loader_enhanced, val_loader_enhanced, test_loader_enhanced,
@@ -885,11 +821,6 @@ def main_with_three_way_comparison():
         print(f"\n  Results saved in: outputs/{ALGORITHM_NAME}_*_three_way/")
         print("=" * 80)
 
-
-# =============================================================================
-# ABLATION STUDY MODE
-# =============================================================================
-
 def main_with_ablation_study():
     """Ablation study: Feature importance analysis using MAGNN-LSTM-Residual."""
 
@@ -946,7 +877,6 @@ def main_with_ablation_study():
                 train_segments, clusters, known_stops=known_stops
             )
 
-            # Train base MAGNN for transfer learning (used by all variants)
             print("\n[5/9] Training base MAGNN for transfer learning...")
             print("-" * 80)
 
@@ -983,9 +913,6 @@ def main_with_ablation_study():
             )
             magnn_checkpoint = os.path.join(output_folder, 'magtte_best.pth')
 
-            # ================================================================
-            # VARIANT 1: FULL MODEL (All features)
-            # ================================================================
             print("\n[6/9] Training MAGNN-LSTM-Residual (FULL - All features)...")
             print("-" * 80)
 
@@ -1030,19 +957,13 @@ def main_with_ablation_study():
             )
             all_full_results.append(full_results)
             print(f"   ✓ Full model trained")
-
-            # ================================================================
-            # VARIANT 2: NO OPERATIONAL (Remove delay features)
-            # ================================================================
             print("\n[7/9] Training MAGNN-LSTM-Residual (NO OPERATIONAL)...")
             print("-" * 80)
 
-            # Create datasets with operational features zeroed out
             train_segments_no_op = train_segments.copy()
             val_segments_no_op = val_segments.copy()
             test_segments_no_op = test_segments.copy()
 
-            # Zero out operational features
             for df in [train_segments_no_op, val_segments_no_op, test_segments_no_op]:
                 df['arrivalDelay'] = 0.0
                 df['departureDelay'] = 0.0
@@ -1090,19 +1011,13 @@ def main_with_ablation_study():
             )
             all_no_operational_results.append(no_op_results)
             print(f"   ✓ No operational model trained")
-
-            # ================================================================
-            # VARIANT 3: NO WEATHER (Remove weather features)
-            # ================================================================
             print("\n[8/9] Training MAGNN-LSTM-Residual (NO WEATHER)...")
             print("-" * 80)
 
-            # Create datasets with weather features zeroed out
             train_segments_no_weather = train_segments.copy()
             val_segments_no_weather = val_segments.copy()
             test_segments_no_weather = test_segments.copy()
 
-            # Zero out weather features
             weather_cols = ['temperature_2m', 'apparent_temperature', 'precipitation',
                            'rain', 'snowfall', 'windspeed_10m', 'windgusts_10m',
                            'winddirection_10m']
@@ -1152,26 +1067,18 @@ def main_with_ablation_study():
             )
             all_no_weather_results.append(no_weather_results)
             print(f"   ✓ No weather model trained")
-
-            # ================================================================
-            # VARIANT 4: BASELINE (Only spatial + temporal)
-            # ================================================================
             print("\n[9/9] Training MAGNN-LSTM-Residual (BASELINE - spatial + temporal only)...")
             print("-" * 80)
 
-            # Create datasets with both operational and weather features zeroed out
             train_segments_baseline = train_segments.copy()
             val_segments_baseline = val_segments.copy()
             test_segments_baseline = test_segments.copy()
 
-            # Zero out ALL optional features
             for df in [train_segments_baseline, val_segments_baseline, test_segments_baseline]:
-                # Operational
                 df['arrivalDelay'] = 0.0
                 df['departureDelay'] = 0.0
                 df['is_weekend'] = 0.0
                 df['is_peak_hour'] = 0.0
-                # Weather
                 for col in weather_cols:
                     if col in df.columns:
                         df[col] = 0.0
@@ -1218,17 +1125,12 @@ def main_with_ablation_study():
             all_baseline_results.append(baseline_results)
             print(f"   ✓ Baseline model trained")
 
-            # ================================================================
-            # COMPARISON TABLE
-            # ================================================================
-            print_section(f"📊 ITERATION {iteration} - ABLATION STUDY RESULTS")
+            print_section(f"ITERATION {iteration} - ABLATION STUDY RESULTS")
 
             for split in ['Train', 'Val', 'Test']:
                 print_ablation_comparison_table(
                     full_results, no_op_results, no_weather_results, baseline_results, split
                 )
-
-            # Save JSON
             ablation_json = {
                 'iteration': iteration,
                 'algorithm': ALGORITHM_NAME,
@@ -1271,14 +1173,11 @@ def main_with_ablation_study():
             print(f"✓ Ablation results saved → {json_path}\n")
 
         except Exception as e:
-            print(f"\n❌ Error in iteration {iteration}: {e}")
+            print(f"\nError in iteration {iteration}: {e}")
             import traceback
             traceback.print_exc()
             continue
 
-    # ====================================================================
-    # FINAL SUMMARY
-    # ====================================================================
     if all_full_results and all_no_operational_results and all_no_weather_results and all_baseline_results:
         print_section("🏆 ABLATION STUDY - FINAL SUMMARY")
 
@@ -1356,10 +1255,9 @@ def main_with_ablation_study():
 
             print(f"{'=' * 130}\n")
 
-        # Feature importance analysis
-        print_section("🔍 FEATURE IMPORTANCE ANALYSIS")
+        print_section("FEATURE IMPORTANCE ANALYSIS")
 
-        for split in ['Test']:  # Focus on test set
+        for split in ['Test']:
             print(f"\n{split.upper()} SET - Feature Contribution Analysis")
             print(f"{'-' * 80}")
 
@@ -1422,8 +1320,6 @@ def main_with_ablation_study():
 
 
 def print_ablation_comparison_table(full_results, no_op_results, no_weather_results, baseline_results, split_name):
-    """Print formatted ablation study comparison table."""
-
     full_m = full_results.get(split_name, {})
     no_op_m = no_op_results.get(split_name, {})
     no_weather_m = no_weather_results.get(split_name, {})
@@ -1492,13 +1388,7 @@ def print_ablation_comparison_table(full_results, no_op_results, no_weather_resu
 
     print(f"{'=' * 130}\n")
 
-
-# =============================================================================
-# MAIN ENTRY POINT
-# =============================================================================
-
 if __name__ == '__main__':
-    # Apply CLI sample fraction override (if provided)
     if _sample_fraction_cli is not None:
         Config.sample_fraction = _sample_fraction_cli
 

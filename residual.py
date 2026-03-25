@@ -14,14 +14,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-
-# =============================================================================
-# ADAPTIVE GATE
-# =============================================================================
-
 class AdaptiveGate(nn.Module):
-    """Learns per-sample gating weight α ∈ [0,1]"""
-
     def __init__(self, spatial_dim, hidden_dim=32):
         super().__init__()
         self.gate_net = nn.Sequential(
@@ -31,19 +24,12 @@ class AdaptiveGate(nn.Module):
             nn.Linear(hidden_dim, 1),
             nn.Sigmoid()
         )
-
-        # Initialize to output ~0.5
         nn.init.zeros_(self.gate_net[3].weight)
         nn.init.constant_(self.gate_net[3].bias, 0.0)
 
     def forward(self, spatial_embedding):
         alpha = self.gate_net(spatial_embedding)
         return alpha
-
-
-# =============================================================================
-# GLOBAL TEMPORAL ATTENTION
-# =============================================================================
 
 class GlobalTemporalAttention(nn.Module):
     def __init__(self, feature_dim, dropout=0.1):
@@ -70,18 +56,7 @@ class GlobalTemporalAttention(nn.Module):
 
         return out, attn_weights
 
-
-# =============================================================================
-# RESIDUAL LSTM - ✅ FIXED INITIALIZATION
-# =============================================================================
-
 class ResidualLSTM(nn.Module):
-    """
-    LSTM that sees MAGNN's baseline prediction + context features.
-
-    ✅ FIX: Xavier initialization instead of tiny random weights
-    """
-
     def __init__(self, spatial_dim, operational_dim, weather_dim,
                  temporal_dim=5, baseline_dim=1,
                  hidden_dim=128, n_layers=1, dropout=0.1):
@@ -120,13 +95,12 @@ class ResidualLSTM(nn.Module):
             nn.Linear(32, 1)
         )
 
-        # ✅ FIX: Xavier initialization (better gradient flow)
         for layer in self.fusion:
             if isinstance(layer, nn.Linear):
                 nn.init.xavier_uniform_(layer.weight)  # ✅ CHANGED from normal_(0, 0.01)
                 nn.init.zeros_(layer.bias)
 
-        print(f"     ✅ Initialization: Xavier (better gradient flow)")
+        print(f"Initialization: Xavier (better gradient flow)")
 
     def forward(self, seq_x):
         batch_size = seq_x.size(0)
@@ -136,21 +110,7 @@ class ResidualLSTM(nn.Module):
         correction = self.fusion(attn_last)
         return correction
 
-
-# =============================================================================
-# MAGNN-LSTM-RESIDUAL
-# =============================================================================
-
 class MAGNN_LSTM_Residual(nn.Module):
-    """
-    MAGNN-LSTM with residual learning and adaptive gating.
-
-    ✅ FIXES:
-    - LSTM sees MAGNN baseline (residual learning)
-    - Xavier initialization (better than tiny random)
-    - Adaptive gating (learned per sample)
-    """
-
     def __init__(self, magnn_model, spatial_dim, operational_dim, weather_dim,
                  temporal_dim=5, lstm_hidden=128, lstm_layers=1, dropout=0.2,
                  freeze_magnn=True):
@@ -194,35 +154,26 @@ class MAGNN_LSTM_Residual(nn.Module):
 
     def forward(self, seg_indices, temporal_features, operational_features, weather_features,
                 return_components=False):
-        # 1. MAGNN baseline
         with torch.no_grad():
             magnn_baseline = self.magnn(seg_indices, temporal_features)
 
-        # 2. Spatial embeddings
         if self.freeze_magnn:
             with torch.no_grad():
                 spatial_embeddings = self.get_magnn_embeddings(seg_indices)
         else:
             spatial_embeddings = self.get_magnn_embeddings(seg_indices)
 
-        # 3. ✅ Concat ALL features INCLUDING MAGNN baseline
         combined_features = torch.cat([
             spatial_embeddings,
             operational_features,
             weather_features,
             temporal_features,
-            magnn_baseline  # ← LSTM SEES THIS!
+            magnn_baseline
         ], dim=1)
 
         seq_features = combined_features.unsqueeze(1)
-
-        # 4. LSTM correction
         lstm_correction = self.residual_lstm(seq_features)
-
-        # 5. Adaptive gate
         alpha = self.adaptive_gate(spatial_embeddings)
-
-        # 6. Final prediction
         final_prediction = magnn_baseline + alpha * lstm_correction
 
         if return_components:
