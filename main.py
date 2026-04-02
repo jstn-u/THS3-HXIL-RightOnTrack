@@ -686,7 +686,7 @@ def main_with_three_way_comparison():
             )
             all_residual_results.append(residual_results)
 
-             print("\n[9/10] Training MAGNN-LSTM-DualTaskMTL (Local + Global)...")
+            print("\n[9/10] Training MAGNN-LSTM-DualTaskMTL (Local + Global)...")
             print("-" * 80)
             mtl_results, mtl_model = train_magnn_lstm_dualtask_mtl(
                 train_loader_enhanced, val_loader_enhanced, test_loader_enhanced,

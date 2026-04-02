@@ -275,7 +275,7 @@ def simple_clustering(df, n_clusters=50, speed_threshold=2.0):
 
     return cluster_centers, cluster_info
 
-def event_driven_clustering_fixed(df, known_stops=None, n_clusters=50):
+def event_driven_clustering_fixed(df, known_stops=None, n_clusters=40):
     print_section("EVENT-DRIVEN CLUSTERING  (K-Means adapter)")
 
     if known_stops:

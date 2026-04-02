@@ -292,7 +292,7 @@ def simple_clustering(df, n_clusters=50, speed_threshold=2.0):
 
 
 
-def event_driven_clustering_fixed(df, known_stops=None, n_clusters=50):
+def event_driven_clustering_fixed(df, known_stops=None, n_clusters=35):
     print_section("EVENT-DRIVEN CLUSTERING  (GMM adapter)")
 
     if known_stops:
