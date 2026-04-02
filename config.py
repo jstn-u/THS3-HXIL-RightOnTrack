@@ -3,8 +3,8 @@ import torch
 class Config:
     data_folder = './data'
 
-    sample_fraction = 0.2
-    n_iterations = 5
+    sample_fraction = 0.20
+    n_iterations = 1
     n_epochs = 50
     batch_size = 64
     learning_rate = 0.001
@@ -16,7 +16,6 @@ class Config:
     lr_scheduler_patience = 5
     early_stopping_patience = 50
 
-    # MAGNN
     n_heads = 3
     node_embed_dim = 32
     gat_hidden = 32
@@ -24,15 +23,12 @@ class Config:
     historical_dim = 16
     dropout = 0.3
 
-    # MTL
     mtl_lambda = 0.5
 
-    # DEVICE
     @property
     def device(self):
         return torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
-    # GLOBAL SETTINGS
 DEVICE = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
 def print_section(title):
@@ -48,5 +44,5 @@ def haversine_meters(lat1, lon1, lat2, lon2):
     dlon = lon2 - lon1
     a = sin(dlat / 2) ** 2 + cos(lat1) * cos(lat2) * sin(dlon / 2) ** 2
     c = 2 * asin(sqrt(a))
-    r = 6371000  # Earth radius in meters
+    r = 6371000
     return c * r
