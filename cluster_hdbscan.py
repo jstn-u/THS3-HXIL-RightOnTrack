@@ -190,7 +190,7 @@ def event_driven_clustering_fixed(df, known_stops=None, merge_radius_m=450):
     else:
         print(f"   No delay clusters survived station absorption")
 
-    MIN_CLUSTER_SPACING_M = 150
+    MIN_CLUSTER_SPACING_M = 75
 
     final_delay = []
     all_kept_coords = [(s_lat, s_lon) for (s_lat, s_lon, _) in station_centers]
