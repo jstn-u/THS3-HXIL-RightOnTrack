@@ -935,11 +935,18 @@ def train_epoch(model, dataloader, optimizer, criterion, device):
 
 
 def evaluate(model, dataloader, criterion, device, scaler):
+    """Evaluate model with detailed inference timing metrics."""
+    import time
+
     model.eval()
     predictions_list = []
     targets_list = []
     total_loss = 0.0
     n_batches = 0
+    model_forward_times = []
+
+    total_inference_start = time.time()
+
     with torch.no_grad():
         for batch in dataloader:
             seg_idx, temporal_pad, target, lengths, mask = batch
@@ -949,7 +956,13 @@ def evaluate(model, dataloader, criterion, device, scaler):
             )
             if seg_idx is None:
                 continue
+
+            forward_start = time.time()
             predictions = model(seg_idx, temporal)
+            if device.type == 'cuda':
+                torch.cuda.synchronize()
+            model_forward_times.append(time.time() - forward_start)
+
             loss = criterion(predictions, target)
             if torch.isnan(loss) or torch.isinf(loss):
                 continue
@@ -957,10 +970,15 @@ def evaluate(model, dataloader, criterion, device, scaler):
             n_batches += 1
             predictions_list.append(predictions.cpu().numpy())
             targets_list.append(target.cpu().numpy())
+
+    total_inference_time = time.time() - total_inference_start
+
     if not predictions_list:
         return {'loss': float('nan'), 'r2': float('nan'),
                 'rmse': float('nan'), 'mae': float('nan'),
-                'mape': float('nan'), 'preds': [], 'actual': []}
+                'mape': float('nan'), 'preds': [], 'actual': [],
+                'inference_timing': {}}
+
     preds = np.concatenate(predictions_list)
     targets = np.concatenate(targets_list)
     preds_orig = scaler.inverse_transform(preds)
@@ -971,6 +989,9 @@ def evaluate(model, dataloader, criterion, device, scaler):
     mask = targets_orig.flatten() > 0
     mape = (np.mean(np.abs((targets_orig.flatten()[mask] - preds_orig.flatten()[mask]) /
                            targets_orig.flatten()[mask])) * 100 if mask.any() else float('nan'))
+
+    num_samples = len(preds)
+
     return {
         'loss': total_loss / max(n_batches, 1),
         'r2': float(r2),
@@ -979,6 +1000,12 @@ def evaluate(model, dataloader, criterion, device, scaler):
         'mape': float(mape),
         'preds': preds_orig.flatten().tolist(),
         'actual': targets_orig.flatten().tolist(),
+        'inference_timing': {
+            'avg_model_forward_ms': np.mean(model_forward_times) * 1000 if model_forward_times else 0,
+            'total_inference_time_s': total_inference_time,
+            'throughput_samples_per_sec': num_samples / total_inference_time if total_inference_time > 0 else 0,
+            'avg_latency_per_sample_ms': (total_inference_time / num_samples) * 1000 if num_samples > 0 else 0,
+        }
     }
 
 def train_magtte(train_loader, val_loader, test_loader,
