@@ -73,6 +73,7 @@ import pandas as pd
 import os
 import json
 import warnings
+import time
 from datetime import datetime
 from torch.utils.data import DataLoader
 import torch.optim as optim
@@ -696,10 +697,16 @@ def main():
         print(f"📁 Output: {output_folder}")
 
         try:
+            # Start pipeline timing
+            pipeline_start = time.time()
+            
+            # Data loading
+            data_load_start = time.time()
             train_df, test_df, val_df = load_train_test_val_data_fixed(
                 data_folder=config.data_folder,
                 sample_fraction=config.sample_fraction
             )
+            data_load_time = time.time() - data_load_start
 
             if len(train_df) == 0:
                 print("❌ No training data")
@@ -715,19 +722,26 @@ def main():
                   f"test={len(known_stops_test)}, "
                   f"val={len(known_stops_val)})")
 
+            # Clustering
+            clustering_start = time.time()
             clusters, station_cluster_ids = event_driven_clustering_fixed(
                 train_df, known_stops=known_stops
             )
+            clustering_time = time.time() - clustering_start
             if len(clusters) == 0:
                 print("❌ No clusters")
                 continue
 
+            # Segment building
+            segment_start = time.time()
             train_segments = build_segments_fixed(train_df, clusters)
             if len(train_segments) == 0:
                 print("❌ No segments")
                 continue
 
             test_segments = build_segments_fixed(test_df, clusters)
+            val_segments = build_segments_fixed(val_df, clusters)
+            segment_time = time.time() - segment_start
             val_segments  = build_segments_fixed(val_df,  clusters)
 
             # ------------------------------------------------------------------
@@ -754,17 +768,19 @@ def main():
             # ------------------------------------------------------------------
             # 5. Adjacency matrices
             # ------------------------------------------------------------------
+            # Adjacency matrices
+            adj_start = time.time()
             adj_geo, adj_dist, adj_soc, segment_types = \
                 build_adjacency_matrices_fixed(
                     train_segments, clusters, known_stops=known_stops)
+            adj_time = time.time() - adj_start
 
             if adj_geo is None:
                 print("❌ Adjacency failed")
                 continue
 
-            # ------------------------------------------------------------------
-            # 6. Datasets & loaders
-            # ------------------------------------------------------------------
+            # Dataset creation
+            dataset_start = time.time()
             train_dataset = SegmentDataset(
                 train_segments, segment_types, fit_scalers=True)
             val_dataset = SegmentDataset(
@@ -785,6 +801,7 @@ def main():
             test_loader = DataLoader(
                 test_dataset, batch_size=config.batch_size,
                 shuffle=False, num_workers=0, collate_fn=masked_collate_fn)
+            dataset_time = time.time() - dataset_start
 
             print(f"\n📊 Data Summary:")
             print(f"   Segment types: {len(segment_types)}")
@@ -796,17 +813,44 @@ def main():
                 print("❌ Training loader empty — skipping")
                 continue
 
+            # Training
+            training_start = time.time()
             results, _ = train_magtte(
                 train_loader, val_loader, test_loader,
                 adj_geo, adj_dist, adj_soc,
                 segment_types, train_dataset.target_scaler,
                 output_folder, DEVICE, config
             )
+            training_time = time.time() - training_start
+            
+            total_pipeline_time = time.time() - pipeline_start
+            
+            # Extract inference timing from test results
+            test_res = results.get('Test', {})
+            inference_timing = test_res.get('inference_timing', {})
+            
+            # ==================== PRINT TIMING METRICS ====================
+            print(f"\n{'='*60}")
+            print(f"TIMING METRICS — {ALGORITHM_NAME}")
+            print(f"{'='*60}")
+            print(f"  Data Loading:              {data_load_time*1000:.2f} ms")
+            print(f"  Clustering Time:           {clustering_time*1000:.2f} ms")
+            print(f"  Segment Building:          {segment_time*1000:.2f} ms")
+            print(f"  Adjacency Matrices:        {adj_time*1000:.2f} ms")
+            print(f"  Dataset Creation:          {dataset_time*1000:.2f} ms")
+            print(f"  Training Time:             {training_time:.2f} s")
+            print(f"  ---")
+            print(f"  Avg Model Forward:         {inference_timing.get('avg_model_forward_ms', 0):.4f} ms")
+            print(f"  Total Inference Time:      {inference_timing.get('total_inference_time_s', 0):.4f} s")
+            print(f"  Throughput:                {inference_timing.get('throughput_samples_per_sec', 0):.2f} samples/sec")
+            print(f"  Avg Latency per Sample:    {inference_timing.get('avg_latency_per_sample_ms', 0):.4f} ms")
+            print(f"  ---")
+            print(f"  Total Pipeline Time:       {total_pipeline_time:.2f} s ({total_pipeline_time*1000:.2f} ms)")
+            print(f"{'='*60}")
 
-            # ------------------------------------------------------------------
-            # 8. Save metrics JSON
-            # ------------------------------------------------------------------
-            DATA_DRIVEN = {'knn', 'hdbscan', 'dbscan'}
+
+            DATA_DRIVEN_METHODS = {'knn', 'hdbscan', 'dbscan'}
+
             metrics_config = {
                 'n_epochs':       config.n_epochs,
                 'batch_size':     config.batch_size,
@@ -814,7 +858,7 @@ def main():
                 'sample_fraction': config.sample_fraction,
                 'n_clusters':     len(clusters),
                 'cluster_count_method': (
-                    'data-driven' if _cluster_method in DATA_DRIVEN
+                    'data-driven' if _cluster_method in DATA_DRIVEN_METHODS
                     else 'requested'),
                 'n_segment_types': len(segment_types),
                 'node_embed_dim': config.node_embed_dim,
@@ -827,13 +871,26 @@ def main():
                 'graph_method': ALGORITHM_NAME.lower(),
                 'config': metrics_config,
                 'timestamp': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+                'timing': {
+                    'data_load_time_ms': round(data_load_time * 1000, 4),
+                    'clustering_time_ms': round(clustering_time * 1000, 4),
+                    'segment_building_time_ms': round(segment_time * 1000, 4),
+                    'adjacency_time_ms': round(adj_time * 1000, 4),
+                    'dataset_creation_time_ms': round(dataset_time * 1000, 4),
+                    'training_time_s': round(training_time, 4),
+                    'avg_model_forward_ms': round(inference_timing.get('avg_model_forward_ms', 0), 4),
+                    'total_inference_time_s': round(inference_timing.get('total_inference_time_s', 0), 4),
+                    'throughput_samples_per_sec': round(inference_timing.get('throughput_samples_per_sec', 0), 2),
+                    'avg_latency_per_sample_ms': round(inference_timing.get('avg_latency_per_sample_ms', 0), 4),
+                    'total_pipeline_time_ms': round(total_pipeline_time * 1000, 4),
+                }
             }
 
-            for ds_name, res in [('Train', results.get('Train')),
-                                  ('Val',   results.get('Val')),
-                                  ('Test',  results.get('Test'))]:
+            for dataset_name, res in [('Train', results.get('Train')),
+                                      ('Val', results.get('Val')),
+                                      ('Test', results.get('Test'))]:
                 if res:
-                    metrics_out[ds_name] = {
+                    metrics_out[dataset_name] = {
                         'R2':   f"{res['r2']:.4f}",
                         'RMSE': f"{res['rmse']:.2f} seconds",
                         'MAE':  f"{res['mae']:.2f} seconds",

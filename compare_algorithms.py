@@ -8,6 +8,14 @@ USAGE
     python compare_algorithms.py                  # defaults from config
     python compare_algorithms.py 0.1              # 10% sample fraction
 
+RESUME / PARTIAL RUNS
+---------------------
+    # Choose a stable run folder so you can restart later and skip completed algorithms
+    python compare_algorithms.py --run-folder outputs/algorithm_comparison_run1 --resume
+
+    # Run only a subset of algorithms
+    python compare_algorithms.py --algorithms kmeans,gmm --run-folder outputs/algorithm_comparison_run1 --resume
+
 Algorithms tested: kmeans, knn, dbscan, hdbscan, gmm
 
 Results saved to:
@@ -36,6 +44,100 @@ from model import (SegmentDataset, masked_collate_fn, train_magtte)
 
 # All clustering algorithms to compare
 ALGORITHMS = ['kmeans', 'knn', 'dbscan', 'hdbscan', 'gmm']
+
+
+def _parse_args(argv):
+    """Parse CLI args without extra dependencies.
+
+    Supported:
+      - sample_fraction as a float (<= 1.0)
+      - --run-folder <path>
+      - --resume
+      - --algorithms a,b,c   (comma-separated, case-insensitive)
+    """
+
+    sample_fraction = None
+    run_folder = None
+    resume = False
+    algorithms = None
+
+    i = 0
+    while i < len(argv):
+        arg = argv[i]
+
+        if arg == '--resume':
+            resume = True
+            i += 1
+            continue
+
+        if arg in ('--run-folder', '--run_folder'):
+            if i + 1 >= len(argv):
+                raise ValueError("--run-folder requires a path")
+            run_folder = argv[i + 1]
+            i += 2
+            continue
+
+        if arg in ('--algorithms', '--algorithm', '--algos'):
+            if i + 1 >= len(argv):
+                raise ValueError("--algorithms requires a comma-separated list")
+            algorithms = [a.strip().lower() for a in argv[i + 1].split(',') if a.strip()]
+            i += 2
+            continue
+
+        # positional numeric argument: sample_fraction
+        try:
+            val = float(arg)
+            if val <= 1.0:
+                sample_fraction = val
+            else:
+                print(f"⚠️  Ignoring numeric arg '{arg}' (>1.0). This script no longer accepts n_clusters.")
+        except ValueError:
+            print(f"⚠️  Unknown argument '{arg}' — ignored.")
+
+        i += 1
+
+    return sample_fraction, run_folder, resume, algorithms
+
+
+def _load_existing_metrics(algorithm_output_folder):
+    """Load per-algorithm metrics.json if it exists and is readable."""
+    json_path = os.path.join(algorithm_output_folder, 'metrics.json')
+    if not os.path.exists(json_path):
+        return None
+    try:
+        with open(json_path, 'r') as f:
+            return json.load(f)
+    except Exception as e:
+        print(f"⚠️  Found existing metrics but failed to load: {json_path} ({e})")
+        return None
+
+
+def _save_combined_results(run_folder, all_results, config):
+    """Write combined CSV/JSON so partial runs still produce usable outputs."""
+    if not all_results:
+        return
+
+    csv_path = os.path.join(run_folder, 'comparison_results.csv')
+    fieldnames = list(all_results[0].keys())
+    with open(csv_path, 'w', newline='') as f:
+        writer = csv.DictWriter(f, fieldnames=fieldnames)
+        writer.writeheader()
+        writer.writerows(all_results)
+
+    json_path = os.path.join(run_folder, 'comparison_results.json')
+    with open(json_path, 'w') as f:
+        json.dump({
+            'config': {
+                'sample_fraction': config.sample_fraction,
+                'n_epochs': config.n_epochs,
+                'batch_size': config.batch_size,
+                'learning_rate': config.learning_rate,
+                'device': str(DEVICE),
+            },
+            'timestamp': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+            'algorithms_tested': [r.get('algorithm', '') for r in all_results],
+            'results': all_results,
+        }, f, indent=2)
 
 
 def run_algorithm_experiment(method, config, run_folder):
@@ -285,23 +387,18 @@ def print_comparison_table(all_results):
 
 def main():
     # Parse command line arguments
-    sample_fraction = None
-    
-    for arg in sys.argv[1:]:
-        try:
-            val = float(arg)
-            if val <= 1.0:
-                sample_fraction = val
-        except ValueError:
-            print(f"⚠️  Unknown argument '{arg}' — ignored.")
-    
+    sample_fraction, run_folder_arg, resume, algorithms_arg = _parse_args(sys.argv[1:])
+
     config = Config()
     if sample_fraction is not None:
         config.sample_fraction = sample_fraction
-    
-    # Create output folder
-    timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
-    run_folder = f"outputs/algorithm_comparison_{timestamp}"
+
+    # Create output folder (use a stable folder for resume if provided)
+    if run_folder_arg:
+        run_folder = run_folder_arg
+    else:
+        timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+        run_folder = f"outputs/algorithm_comparison_{timestamp}"
     os.makedirs(run_folder, exist_ok=True)
     
     print_section("ALGORITHM COMPARISON — MAGNN-LSTM-MTL")
@@ -310,21 +407,34 @@ def main():
     print(f"  Epochs: {config.n_epochs}")
     print(f"  Batch size: {config.batch_size}")
     print(f"  Learning rate: {config.learning_rate}")
-    print(f"  Algorithms: {', '.join([a.upper() for a in ALGORITHMS])}")
+    algos_to_run = algorithms_arg if algorithms_arg is not None else ALGORITHMS
+    print(f"  Algorithms: {', '.join([a.upper() for a in algos_to_run])}")
     print(f"  📁 Output: {run_folder}")
+    if resume:
+        print(f"  Resume mode: ON (will skip algorithms with existing metrics.json)")
     print("=" * 80)
     
     all_results = []
-    
-    for algorithm in ALGORITHMS:
+
+    for algorithm in algos_to_run:
         print(f"\n{'#' * 80}")
         print(f"# Running {algorithm.upper()}")
         print(f"{'#' * 80}\n")
-        
+
+        algorithm_output_folder = os.path.join(run_folder, algorithm.upper())
+        if resume:
+            existing = _load_existing_metrics(algorithm_output_folder)
+            if existing is not None:
+                print(f"✓ Found existing result for {algorithm.upper()} — skipping")
+                all_results.append(existing)
+                _save_combined_results(run_folder, all_results, config)
+                continue
+
         result = run_algorithm_experiment(algorithm, config, run_folder)
         
         if result:
             all_results.append(result)
+            _save_combined_results(run_folder, all_results, config)
         else:
             print(f"⚠️  {algorithm.upper()} experiment failed, skipping...")
     
@@ -335,31 +445,10 @@ def main():
     # Print comparison table
     print_comparison_table(all_results)
     
-    # Save combined results to CSV
-    csv_path = os.path.join(run_folder, 'comparison_results.csv')
-    fieldnames = all_results[0].keys()
-    with open(csv_path, 'w', newline='') as f:
-        writer = csv.DictWriter(f, fieldnames=fieldnames)
-        writer.writeheader()
-        writer.writerows(all_results)
-    print(f"\n✓ CSV saved → {csv_path}")
-    
-    # Save combined results to JSON
-    json_path = os.path.join(run_folder, 'comparison_results.json')
-    with open(json_path, 'w') as f:
-        json.dump({
-            'config': {
-                'sample_fraction': config.sample_fraction,
-                'n_epochs': config.n_epochs,
-                'batch_size': config.batch_size,
-                'learning_rate': config.learning_rate,
-                'device': str(DEVICE),
-            },
-            'timestamp': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
-            'algorithms_tested': ALGORITHMS,
-            'results': all_results,
-        }, f, indent=2)
-    print(f"✓ JSON saved → {json_path}")
+    # Final save (also done incrementally)
+    _save_combined_results(run_folder, all_results, config)
+    print(f"\n✓ CSV saved → {os.path.join(run_folder, 'comparison_results.csv')}")
+    print(f"✓ JSON saved → {os.path.join(run_folder, 'comparison_results.json')}")
     
     print(f"\n🎉 Comparison complete! Results in: {run_folder}")
 
