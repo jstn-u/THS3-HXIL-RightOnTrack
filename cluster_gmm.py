@@ -1,16 +1,4 @@
-"""
-cluster_gmm.py
-==============
-Gaussian Mixture Model clustering with diagonal covariance.
 
-Public API (identical across all cluster_*.py modules):
-    event_driven_clustering_fixed(df, known_stops=None, n_clusters=50)
-        -> (cluster_centers: np.ndarray shape (N,2),
-            station_cluster_ids: set of int)
-
-To switch clustering method in main.py, change only:
-    from cluster_gmm import event_driven_clustering_fixed
-"""
 
 import numpy as np
 import pandas as pd
@@ -23,99 +11,6 @@ warnings.filterwarnings('ignore')
 from config import print_section, haversine_meters
 
 def simple_clustering(df, n_clusters=50, speed_threshold=2.0):
-    """
-    Cluster transit stops using Gaussian Mixture Model (GMM).
-
-    This function identifies potential transit stops by filtering low-speed GPS
-    points, then applies GMM clustering to discover cluster centers. GMM fits
-    a mixture of Gaussian distributions to the data, where each cluster is
-    represented by a Gaussian with its own mean (center) and covariance (shape).
-
-    GMM Algorithm Overview:
-        GMM assumes data is generated from a mixture of K Gaussian distributions.
-        The algorithm uses Expectation-Maximization (EM) to find optimal parameters:
-
-        1. Initialization: Set initial means, covariances, and weights
-        2. E-step: Compute probability each point belongs to each cluster
-        3. M-step: Update means, covariances, weights based on probabilities
-        4. Repeat E-M until convergence (log-likelihood stabilizes)
-
-        Each Gaussian component is defined by:
-        - Mean (μ): Center of the cluster (latitude, longitude)
-        - Covariance (Σ): Shape and orientation of the cluster
-        - Weight (π): Proportion of data belonging to this cluster
-
-    Algorithm Steps:
-        1. Filter low-speed points (potential stops where vehicles pause)
-        2. Remove outliers and invalid coordinates
-        3. Fit GMM with n_components = n_clusters
-        4. Extract cluster centers as Gaussian means
-        5. Assign each point to most likely cluster (hard assignment)
-        6. Calculate cluster metadata and statistics
-
-    Args:
-        df (pd.DataFrame): Transit GPS data with required columns:
-            - 'latitude': GPS latitude coordinate (float)
-            - 'longitude': GPS longitude coordinate (float)
-            - 'speed_mps' (optional): Speed in meters per second (float)
-        n_clusters (int): Number of Gaussian components (clusters) to fit.
-            Default is 50. Unlike DBSCAN, this must be specified.
-        speed_threshold (float): Maximum speed (m/s) to consider a point as a
-            potential stop. Points with speed >= threshold are excluded.
-            Default is 2.0 m/s (~7.2 km/h, typical walking speed).
-
-    Returns:
-        tuple: A tuple containing:
-            - cluster_centers (np.ndarray): Array of shape (n_clusters, 2) with
-              [latitude, longitude] for each cluster center (Gaussian means).
-            - cluster_info (dict): Dictionary mapping cluster index to metadata:
-              {
-                  'center': (lat, lon),       # Gaussian mean
-                  'size': int,                # Number of points assigned
-                  'method': 'gmm',            # Clustering method identifier
-                  'weight': float,            # Component weight (importance)
-                  'covariance': list          # 2x2 covariance matrix
-              }
-
-    Raises:
-        ValueError: If GMM clustering fails to converge or finds no clusters.
-            This ensures no silent fallback to different algorithms.
-
-    Example:
-        >>> clusters, info = simple_clustering(train_df, n_clusters=50)
-        >>> print(f"Found {len(clusters)} clusters")
-        Found 50 clusters
-        >>> print(f"Cluster 0: center={info[0]['center']}, weight={info[0]['weight']:.4f}")
-        Cluster 0: center=(40.7128, -74.0060), weight=0.0234
-
-    Notes:
-        - Uses full covariance matrices for maximum flexibility
-        - Multiple initializations (n_init=5) to avoid local optima
-        - Converges when log-likelihood improvement < tol (1e-3)
-        - Soft assignments available via gmm.predict_proba()
-
-    Parameter Tuning Guide:
-        n_components (n_clusters):
-            - Too few: Clusters too large, lose stop granularity
-            - Too many: Overfitting, some clusters have few points
-            - Typical: 30-100 for urban transit networks
-
-        covariance_type:
-            - 'full': Each cluster has own covariance (most flexible)
-            - 'tied': All clusters share same covariance
-            - 'diag': Diagonal covariance (axis-aligned ellipses)
-            - 'spherical': Single variance per cluster (circular)
-
-        n_init:
-            - Higher values = better chance of finding global optimum
-            - Trade-off with computation time
-            - Recommended: 5-10
-
-    References:
-        - Reynolds, D.A. (2009). Gaussian Mixture Models. Encyclopedia of Biometrics.
-        - Dempster, A.P., Laird, N.M., Rubin, D.B. (1977). Maximum likelihood from
-          incomplete data via the EM algorithm.
-    """
     print_section("STEP 2: CLUSTERING STOPS/STATIONS (GMM)")
 
     if df.empty:
@@ -231,22 +126,6 @@ def simple_clustering(df, n_clusters=50, speed_threshold=2.0):
         print("    - Decrease n_clusters")
         print("    - Try different covariance_type")
         print("=" * 60)
-
-    # if len(cluster_centers) == 0:
-    #     print("\n" + "=" * 60)
-    #     print("✗ GMM CLUSTERING FAILED")
-    #     print("=" * 60)
-    #     print("  No valid clusters were found by the GMM algorithm.")
-    #     print("\n  Possible causes:")
-    #     print("    1. n_clusters is too high for the data size")
-    #     print("    2. Data has insufficient variance")
-    #     print("    3. Numerical instability in covariance estimation")
-    #     print("\n  Suggested fixes:")
-    #     print(f"    - Decrease n_clusters (current: {actual_n_clusters})")
-    #     print("    - Use 'diag' or 'spherical' covariance_type")
-    #     print("    - Increase sample_fraction to include more data")
-    #     print("=" * 60)
-    #     raise ValueError("GMM clustering failed: No valid clusters found. Cannot proceed.")
 
     print(f"\n{'='*60}")
     print(f"GMM CLUSTERING SUMMARY")

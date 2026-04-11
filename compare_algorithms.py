@@ -1,29 +1,3 @@
-"""
-compare_algorithms.py
-=====================
-Compare inference timing across all clustering algorithms for MAGNN-LSTM-MTL.
-
-USAGE
------
-    python compare_algorithms.py                  # defaults from config
-    python compare_algorithms.py 0.1              # 10% sample fraction
-
-RESUME / PARTIAL RUNS
----------------------
-    # Choose a stable run folder so you can restart later and skip completed algorithms
-    python compare_algorithms.py --run-folder outputs/algorithm_comparison_run1 --resume
-
-    # Run only a subset of algorithms
-    python compare_algorithms.py --algorithms kmeans,gmm --run-folder outputs/algorithm_comparison_run1 --resume
-
-Algorithms tested: kmeans, knn, dbscan, hdbscan, gmm
-
-Results saved to:
-    outputs/algorithm_comparison_<timestamp>/comparison_results.csv
-    outputs/algorithm_comparison_<timestamp>/comparison_results.json
-    outputs/algorithm_comparison_<timestamp>/<ALGORITHM>/  (per-algorithm files)
-"""
-
 import importlib
 import os
 import sys
@@ -47,15 +21,6 @@ ALGORITHMS = ['kmeans', 'knn', 'dbscan', 'hdbscan', 'gmm']
 
 
 def _parse_args(argv):
-    """Parse CLI args without extra dependencies.
-
-    Supported:
-      - sample_fraction as a float (<= 1.0)
-      - --run-folder <path>
-      - --resume
-      - --algorithms a,b,c   (comma-separated, case-insensitive)
-    """
-
     sample_fraction = None
     run_folder = None
     resume = False
@@ -90,9 +55,9 @@ def _parse_args(argv):
             if val <= 1.0:
                 sample_fraction = val
             else:
-                print(f"⚠️  Ignoring numeric arg '{arg}' (>1.0). This script no longer accepts n_clusters.")
+                print(f"This script no longer accepts n_clusters.")
         except ValueError:
-            print(f"⚠️  Unknown argument '{arg}' — ignored.")
+            print(f"Unknown argument")
 
         i += 1
 
@@ -108,7 +73,7 @@ def _load_existing_metrics(algorithm_output_folder):
         with open(json_path, 'r') as f:
             return json.load(f)
     except Exception as e:
-        print(f"⚠️  Found existing metrics but failed to load: {json_path} ({e})")
+        print(f"Found existing metrics but failed to load: {json_path} ({e})")
         return None
 
 
@@ -141,8 +106,6 @@ def _save_combined_results(run_folder, all_results, config):
 
 
 def run_algorithm_experiment(method, config, run_folder):
-    """Run a single algorithm experiment and return timing metrics."""
-    
     pipeline_start = time.time()
     
     module = importlib.import_module(f'cluster_{method}')
@@ -153,9 +116,8 @@ def run_algorithm_experiment(method, config, run_folder):
     os.makedirs(output_folder, exist_ok=True)
     
     print_section(f"ALGORITHM: {algo_name}")
-    print(f"  📁 Output: {output_folder}")
+    print(f"Output: {output_folder}")
     
-    # ==================== DATA LOADING ====================
     data_load_start = time.time()
     train_df, test_df, val_df = load_train_test_val_data_fixed(
         data_folder=config.data_folder,
@@ -164,7 +126,7 @@ def run_algorithm_experiment(method, config, run_folder):
     data_load_time = time.time() - data_load_start
     
     if len(train_df) == 0:
-        print("❌ No training data")
+        print("No data")
         return None
     
     known_stops_train = get_known_stops(train_df)
@@ -172,7 +134,6 @@ def run_algorithm_experiment(method, config, run_folder):
     known_stops_val = get_known_stops(val_df)
     known_stops = {**known_stops_test, **known_stops_val, **known_stops_train}
     
-    # ==================== CLUSTERING TIME ====================
     clustering_start = time.time()
     clusters, station_cluster_ids = event_driven_clustering_fixed(
         train_df, known_stops=known_stops,
@@ -180,16 +141,16 @@ def run_algorithm_experiment(method, config, run_folder):
     clustering_time = time.time() - clustering_start
     
     if len(clusters) == 0:
-        print("❌ No clusters produced")
+        print("No clusters produced")
         return None
     
-    print(f"  ✓ Clusters created: {len(clusters)} (clustering took {clustering_time*1000:.2f} ms)")
+    print(f"Clusters created: {len(clusters)} (clustering took {clustering_time*1000:.2f} ms)")
     
     # ==================== SEGMENT BUILDING ====================
     segment_start = time.time()
     train_segments = build_segments_fixed(train_df, clusters)
     if len(train_segments) == 0:
-        print("❌ No segments")
+        print("No segments")
         return None
     
     test_segments = build_segments_fixed(test_df, clusters)
@@ -207,7 +168,6 @@ def run_algorithm_experiment(method, config, run_folder):
                             algorithm_name=algo_name,
                             save_path=os.path.join(output_folder, f'{algo_name.lower()}-segment_stats.png'))
     
-    # ==================== ADJACENCY MATRICES ====================
     adj_start = time.time()
     adj_geo, adj_dist, adj_soc, segment_types = build_adjacency_matrices_fixed(
         train_segments, clusters, known_stops=known_stops,
@@ -215,10 +175,9 @@ def run_algorithm_experiment(method, config, run_folder):
     adj_time = time.time() - adj_start
     
     if adj_geo is None:
-        print("❌ Adjacency failed")
+        print("Adjacency failed")
         return None
     
-    # ==================== DATASET CREATION ====================
     dataset_start = time.time()
     train_dataset = SegmentDataset(train_segments, segment_types, fit_scalers=True)
     val_dataset = SegmentDataset(val_segments, segment_types,
@@ -247,7 +206,7 @@ def run_algorithm_experiment(method, config, run_folder):
           f"test: {len(test_dataset):,}")
     
     if len(train_loader) == 0:
-        print("❌ Training loader is empty")
+        print("Training loader is empty")
         return None
     
     # ==================== TRAINING ====================
@@ -262,11 +221,9 @@ def run_algorithm_experiment(method, config, run_folder):
     
     total_pipeline_time = time.time() - pipeline_start
     
-    # Extract inference timing from test results
     test_res = results.get('Test', {})
     inference_timing = test_res.get('inference_timing', {})
     
-    # ==================== PRINT TIMING METRICS ====================
     print(f"\n{'='*60}")
     print(f"TIMING METRICS — {algo_name}")
     print(f"{'='*60}")
@@ -285,7 +242,6 @@ def run_algorithm_experiment(method, config, run_folder):
     print(f"  Total Pipeline Time:       {total_pipeline_time:.2f} s ({total_pipeline_time*1000:.2f} ms)")
     print(f"{'='*60}")
     
-    # Build result dictionary
     result = {
         'algorithm': algo_name,
         'n_clusters': len(clusters),
@@ -294,7 +250,6 @@ def run_algorithm_experiment(method, config, run_folder):
         'val_samples': len(val_dataset),
         'test_samples': len(test_dataset),
         
-        # Timing metrics (KEY COMPARISON METRICS)
         'clustering_time_ms': round(clustering_time * 1000, 4),
         'avg_model_forward_ms': round(inference_timing.get('avg_model_forward_ms', 0), 4),
         'total_inference_time_s': round(inference_timing.get('total_inference_time_s', 0), 4),
@@ -302,14 +257,12 @@ def run_algorithm_experiment(method, config, run_folder):
         'avg_latency_per_sample_ms': round(inference_timing.get('avg_latency_per_sample_ms', 0), 4),
         'total_pipeline_time_ms': round(total_pipeline_time * 1000, 4),
         
-        # Additional timing breakdown
         'data_load_time_ms': round(data_load_time * 1000, 4),
         'segment_building_time_ms': round(segment_time * 1000, 4),
         'adjacency_time_ms': round(adj_time * 1000, 4),
         'dataset_creation_time_ms': round(dataset_time * 1000, 4),
         'training_time_s': round(training_time, 4),
         
-        # Model performance metrics
         'test_r2': round(test_res.get('r2', 0), 4),
         'test_rmse': round(test_res.get('rmse', 0), 2),
         'test_mae': round(test_res.get('mae', 0), 2),
@@ -318,7 +271,6 @@ def run_algorithm_experiment(method, config, run_folder):
         'output_folder': output_folder,
     }
     
-    # Save individual algorithm metrics
     json_path = os.path.join(output_folder, 'metrics.json')
     with open(json_path, 'w') as f:
         json.dump(result, f, indent=2)
@@ -328,8 +280,7 @@ def run_algorithm_experiment(method, config, run_folder):
 
 
 def print_comparison_table(all_results):
-    """Print a formatted comparison table of all algorithms."""
-    
+
     print("\n")
     print("=" * 100)
     print("ALGORITHM COMPARISON — INFERENCE TIMING METRICS")
@@ -350,11 +301,7 @@ def print_comparison_table(all_results):
               f"{r['total_pipeline_time_ms']:>10.2f}")
     
     print("-" * 100)
-    
-    # Find best for each metric
-    print("\n📊 BEST PERFORMERS:")
-    
-    # Clustering time (lower is better)
+
     best_cluster = min(all_results, key=lambda x: x['clustering_time_ms'])
     print(f"  Fastest Clustering:        {best_cluster['algorithm']} ({best_cluster['clustering_time_ms']:.2f} ms)")
     
@@ -386,14 +333,12 @@ def print_comparison_table(all_results):
 
 
 def main():
-    # Parse command line arguments
     sample_fraction, run_folder_arg, resume, algorithms_arg = _parse_args(sys.argv[1:])
 
     config = Config()
     if sample_fraction is not None:
         config.sample_fraction = sample_fraction
 
-    # Create output folder (use a stable folder for resume if provided)
     if run_folder_arg:
         run_folder = run_folder_arg
     else:
@@ -409,7 +354,7 @@ def main():
     print(f"  Learning rate: {config.learning_rate}")
     algos_to_run = algorithms_arg if algorithms_arg is not None else ALGORITHMS
     print(f"  Algorithms: {', '.join([a.upper() for a in algos_to_run])}")
-    print(f"  📁 Output: {run_folder}")
+    print(f"Output: {run_folder}")
     if resume:
         print(f"  Resume mode: ON (will skip algorithms with existing metrics.json)")
     print("=" * 80)
@@ -436,10 +381,10 @@ def main():
             all_results.append(result)
             _save_combined_results(run_folder, all_results, config)
         else:
-            print(f"⚠️  {algorithm.upper()} experiment failed, skipping...")
+            print(f"{algorithm.upper()} experiment failed, skipping...")
     
     if not all_results:
-        print("\n❌ All experiments failed!")
+        print("\nAll experiments failed!")
         return
     
     # Print comparison table
@@ -447,10 +392,10 @@ def main():
     
     # Final save (also done incrementally)
     _save_combined_results(run_folder, all_results, config)
-    print(f"\n✓ CSV saved → {os.path.join(run_folder, 'comparison_results.csv')}")
-    print(f"✓ JSON saved → {os.path.join(run_folder, 'comparison_results.json')}")
+    print(f"\n{os.path.join(run_folder, 'comparison_results.csv')}")
+    print(f"{os.path.join(run_folder, 'comparison_results.json')}")
     
-    print(f"\n🎉 Comparison complete! Results in: {run_folder}")
+    print(f"\nResults: {run_folder}")
 
 
 if __name__ == '__main__':

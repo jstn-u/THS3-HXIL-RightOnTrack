@@ -1,16 +1,4 @@
-"""
-cluster_hdbscan.py
-==================
-HDBSCAN-based event-driven clustering.
 
-Public API (identical across all cluster_*.py modules):
-    event_driven_clustering_fixed(df, known_stops=None)
-        -> (cluster_centers: np.ndarray shape (N,2),
-            station_cluster_ids: set of int)
-
-To switch clustering method in main.py, change only:
-    from cluster_hdbscan import event_driven_clustering_fixed
-"""
 
 import numpy as np
 import pandas as pd
@@ -32,44 +20,6 @@ from config import print_section, haversine_meters
 
 
 def event_driven_clustering_fixed(df, known_stops=None, merge_radius_m=450):
-    """
-    Event-driven clustering on dwell/slowdown points via HDBSCAN.
-
-    Guaranteed station injection
-    ─────────────────────────────
-    Every entry in `known_stops` (dict: station_name → (lat, lon)) is
-    ALWAYS included as a cluster centre, regardless of whether HDBSCAN
-    finds enough points nearby.  This ensures all 13 real stations are
-    present in the cluster list even when the sample fraction is small.
-
-    After HDBSCAN, the pipeline runs in this order:
-      1. HDBSCAN finds delay hotspot candidates from event points.
-      2. Drop any candidate within merge_radius_m of a known station.
-         Every ABSORBED/KEPT decision is printed with the distance to the
-         nearest station so the caller can tune the radius.
-      3. Merge remaining candidates using complete-linkage agglomerative
-         clustering (all pairs in a group must be within 50m — prevents
-         chain merging that produces centroids far from any real hotspot).
-      4. Enforce minimum spacing (300m) between all surviving delay clusters
-         and between delay clusters and stations.  Every SPACING DROP/KEEP
-         decision is printed with the distance to the nearest kept coord.
-      5. Assemble final array: stations first (indices 0…n_stations-1),
-         delay clusters follow at higher indices.
-
-    Parameters
-    ──────────
-    df            : GPS event DataFrame
-    known_stops   : dict  station_name → (lat, lon)
-    merge_radius_m: int   absorption radius in metres (default 300).
-                    300 = aggressive (matches cluster-assign radius).
-                    200 = moderate.
-                    150 = tight (only immediate platform area).
-
-    Returns
-    ───────
-    cluster_centers     : np.ndarray  shape (N, 2)  — [lat, lon] per cluster
-    station_cluster_ids : set of int — indices that are real stations
-    """
     print_section("EVENT-DRIVEN CLUSTERING")
 
     if not HAS_HDBSCAN:

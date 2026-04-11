@@ -1,37 +1,3 @@
-"""
-cluster_dbscan.py
-=================
-DBSCAN-based clustering with density-adaptive eps via k-distance elbow method.
-
-The cluster count is fully data-driven — DBSCAN discovers natural density
-regions without requiring a target number of clusters.
-
-Public API (identical across all cluster_*.py modules):
-    event_driven_clustering_fixed(df, known_stops=None)
-        -> (cluster_centers: np.ndarray shape (N,2),
-            station_cluster_ids: set of int)
-
-To switch clustering method in main.py, change only:
-    from cluster_dbscan import event_driven_clustering_fixed
-
-    # =========================================================================
-    # K-DISTANCE ELBOW METHOD — FINDING OPTIMAL EPS (no external dependencies)
-    #
-    # Classic DBSCAN parameter selection (Ester et al. 1996):
-    #   1. Compute the distance to each point's k-th nearest neighbour
-    #      (k = min_samples).
-    #   2. Sort those distances in ascending order → the "k-distance plot".
-    #   3. The optimal eps is at the "elbow" — where the sorted curve bends
-    #      sharply upward, separating dense cluster interiors from sparse
-    #      noise / inter-cluster gaps.
-    #
-    # We detect the elbow by finding the point of maximum curvature: draw a
-    # straight line from the first to the last point on the sorted curve,
-    # then pick the point with the greatest perpendicular distance from
-    # that line.
-    # =========================================================================
-"""
-
 import numpy as np
 import pandas as pd
 from sklearn.cluster import DBSCAN
@@ -43,100 +9,6 @@ warnings.filterwarnings('ignore')
 from config import print_section, haversine_meters
 
 def simple_clustering(df, speed_threshold=2.0):
-    """
-    Cluster transit stops using DBSCAN (Density-Based Spatial Clustering).
-
-    This function identifies potential transit stops by filtering low-speed GPS
-    points, then applies DBSCAN clustering to discover natural groupings based
-    on spatial density.  Unlike K-Means or GMM, DBSCAN does NOT require
-    specifying the number of clusters — the count emerges naturally from the
-    data's density structure.
-
-    DBSCAN Algorithm Overview:
-        DBSCAN groups points based on local density. It defines clusters as
-        dense regions separated by sparser regions. The algorithm uses two
-        key parameters:
-
-        - eps (ε): Maximum radius to search for neighbors. Points within this
-          distance are considered neighbors.
-        - min_samples: Minimum number of points required to form a dense region
-          (core point).
-
-        Point Classification:
-        - Core Point: Has ≥ min_samples neighbors within eps radius
-        - Border Point: Within eps of a core point, but not core itself
-        - Noise Point: Neither core nor border (labeled as -1)
-
-    Algorithm Steps:
-        1. Filter low-speed points (potential stops where vehicles pause)
-        2. Remove outliers and invalid coordinates
-        3. Convert coordinates to radians for Haversine distance
-        4. Determine optimal eps via k-distance elbow method
-        5. Apply DBSCAN with Haversine metric via BallTree
-        6. Extract cluster centers as centroids of each cluster
-        7. Filter out noise points (label = -1)
-        8. Calculate cluster metadata and statistics
-
-    Args:
-        df (pd.DataFrame): Transit GPS data with required columns:
-            - 'latitude': GPS latitude coordinate (float)
-            - 'longitude': GPS longitude coordinate (float)
-            - 'speed_mps' (optional): Speed in meters per second (float)
-        speed_threshold (float): Maximum speed (m/s) to consider a point as a
-            potential stop. Points with speed >= threshold are excluded.
-            Default is 2.0 m/s (~7.2 km/h, typical walking speed).
-
-    Returns:
-        tuple: A tuple containing:
-            - cluster_centers (np.ndarray): Array of shape (N, 2) with
-              [latitude, longitude] for each cluster center.  N is determined
-              naturally by the data's density structure.
-            - cluster_info (dict): Dictionary mapping cluster index to metadata:
-              {
-                  'center': (lat, lon),       # Cluster centroid
-                  'size': int,                # Number of points in cluster
-                  'method': 'dbscan',         # Clustering method identifier
-                  'eps_meters': float,        # Epsilon in meters used
-                  'min_samples': int,         # Min samples parameter used
-                  'n_core_points': int,       # Number of core points
-                  'n_noise_points': int       # Total noise points (for info[0])
-              }
-
-    Raises:
-        ValueError: If DBSCAN clustering fails to find any valid clusters.
-            This ensures no silent fallback to different algorithms.
-
-    Example:
-        >>> clusters, info = simple_clustering(train_df)
-        >>> print(f"Found {len(clusters)} clusters")
-        Found 47 clusters
-        >>> print(f"Cluster 0: center={info[0]['center']}, size={info[0]['size']}")
-        Cluster 0: center=(40.7128, -74.0060), size=156
-
-    Notes:
-        - Uses Haversine distance metric for geographic accuracy
-        - eps is auto-calculated via k-distance elbow method (data-driven)
-        - Cluster count is data-driven — no target count needed
-        - Noise points are automatically excluded from clusters
-        - No fallback algorithm — fails explicitly if DBSCAN cannot cluster
-        - Computational complexity: O(n²) worst case, O(n log n) with BallTree
-
-    Parameter Tuning Guide:
-        eps (epsilon) - Maximum neighbor distance:
-            - Too small: Many noise points, fragmented clusters
-            - Too large: Everything merges into one cluster
-            - Typical values: 0.0003-0.001 radians (20-110 meters)
-
-        min_samples - Minimum points for core status:
-            - Too small: Noise gets included in clusters
-            - Too large: Valid clusters marked as noise
-            - Typical values: 3-10 for transit data
-
-    References:
-        - Ester, M., Kriegel, H.P., Sander, J., Xu, X. (1996). A density-based
-          algorithm for discovering clusters in large spatial databases with noise.
-          KDD-96 Proceedings, pp. 226-231.
-    """
     print_section("STEP 2: CLUSTERING STOPS/STATIONS (DBSCAN)")
 
     if df.empty:
@@ -275,7 +147,6 @@ def simple_clustering(df, speed_threshold=2.0):
         algorithm='ball_tree',
         n_jobs=-1
     )
-
     cluster_labels = dbscan.fit_predict(coords_radians)
 
     unique_labels = np.unique(cluster_labels)
@@ -328,24 +199,6 @@ def simple_clustering(df, speed_threshold=2.0):
     if cluster_info:
         cluster_info[0]['n_noise_points_total'] = n_noise
 
-    # if len(cluster_centers) == 0:
-    #     print("\n" + "=" * 60)
-    #     print("✗ DBSCAN CLUSTERING FAILED")
-    #     print("=" * 60)
-    #     print("  No valid clusters were found by the DBSCAN algorithm.")
-    #     print("\n  Possible causes:")
-    #     print("    1. eps is too small - points are too far apart for given radius")
-    #     print("    2. min_samples is too high - not enough dense regions")
-    #     print("    3. Data is too sparse - no natural dense groupings exist")
-    #     print("    4. Data quality issues - excessive GPS errors")
-    #     print("\n  Suggested fixes:")
-    #     print(f"    - Increase eps (current: {eps_meters:.1f}m)")
-    #     print(f"    - Decrease min_samples (current: {min_samples})")
-    #     print("    - Increase sample_fraction to include more data")
-    #     print("    - Lower speed_threshold to include more points")
-    #     print("=" * 60)
-    #     raise ValueError("DBSCAN clustering failed: No valid clusters found. Cannot proceed.")
-
     cluster_centers = np.array(cluster_centers)
 
     print(f"\n{'='*60}")
@@ -377,9 +230,6 @@ def simple_clustering(df, speed_threshold=2.0):
               f"Size={size}, Core={core_pts}")
 
     return cluster_centers, cluster_info
-
-
-
 def event_driven_clustering_fixed(df, known_stops=None):
     print_section("EVENT-DRIVEN CLUSTERING  (DBSCAN adapter)")
 

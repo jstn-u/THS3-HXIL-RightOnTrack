@@ -38,10 +38,10 @@ for _arg in sys.argv[1:]:
         try:
             _sample_fraction_cli = float(_arg)
         except ValueError:
-            print(f"⚠️  Unknown argument '{_arg}' — ignored.")
-            print(f"   Valid methods: {', '.join(sorted(VALID_METHODS))}")
-            print(f"   Valid flags:   --compare-all, --ablation")
-            print(f"   Or pass a number for sample fraction (e.g. 0.1)")
+            print(f"Unknown argument '{_arg}' — ignored.")
+            print(f"Valid methods: {', '.join(sorted(VALID_METHODS))}")
+            print(f"Valid flags:   --compare-all, --ablation")
+            print(f"Or pass a number for sample fraction (e.g. 0.1)")
 
 _cluster_module = importlib.import_module(f'cluster_{_cluster_method}')
 event_driven_clustering_fixed = _cluster_module.event_driven_clustering_fixed
@@ -91,20 +91,12 @@ def _attach_gps_lookup(dataset: EnhancedSegmentDataset,
                        raw_df,
                        clusters,
                        known_stops: dict):
-    """
-    Build (or reuse) a NearestGPSFeatureLookup and SegmentStationMapper and
-    attach them to `dataset` so that __getitem__ can call split_features_for_segment
-    with GPS-level origin/dest feature vectors.
-
-    Safe to call on val/test datasets with the same lookup built from train_df.
-    """
     if not hasattr(dataset, 'gps_lookup') or dataset.gps_lookup is None:
         dataset.gps_lookup     = NearestGPSFeatureLookup(raw_df)
         dataset.station_mapper = SegmentStationMapper(
             np.asarray(clusters), known_stops=known_stops
         )
     return dataset
-
 
 def _make_enhanced_loaders(train_segments, val_segments, test_segments,
                             segment_types, config,
@@ -195,18 +187,6 @@ def _make_trip_loaders(train_segments, val_segments, test_segments,
 
     return train_loader, val_loader, test_loader, train_ds
 
-
-
-
-
-
-
-
-
-# =============================================================================
-# RESIDUAL BATCH UNPACKING HELPER  (trip-sequence version)
-# =============================================================================
-
 def _unpack_residual_trip_batch(batch, device):
     (seg_idx, temporal, context_flags,
      origin_op, dest_op,
@@ -228,11 +208,6 @@ def _unpack_residual_trip_batch(batch, device):
         mask.to(device),           # (B, T)
     )
 
-
-# =============================================================================
-# RESIDUAL MODEL TRAINING FUNCTION  (✅ STATION-AWARE)
-# =============================================================================
-
 def train_magnn_lstm_residual(train_loader, val_loader, test_loader,
                               adj_geo, adj_dist, adj_soc,
                               segment_types, scaler,
@@ -241,18 +216,6 @@ def train_magnn_lstm_residual(train_loader, val_loader, test_loader,
                               known_stops=None,
                               pretrained_magnn_path=None,
                               freeze_magnn=True):
-    """
-    Train MAGNN-LSTM-Residual on trip-grouped sequences.
-
-    Now uses TripDataset (B, T, dim) batches so the LSTM processes each trip
-    as a full sequence in one forward pass — hidden state rolls across all T
-    steps, giving genuine sequential learning.  cum_err is still passed as a
-    context signal (running signed error so far), but the LSTM's own recurrence
-    now also carries information across steps.
-
-    Negative scaled values mean a segment ran faster than the median for that
-    segment type — not an error, just below-median travel time.
-    """
     print_section("MAGNN-LSTM-RESIDUAL TRAINING  (Trip-Sequential)")
     num_segments = len(segment_types)
 
@@ -275,15 +238,13 @@ def train_magnn_lstm_residual(train_loader, val_loader, test_loader,
     if pretrained_magnn_path and os.path.exists(pretrained_magnn_path):
         magnn_base.load_state_dict(
             torch.load(pretrained_magnn_path, map_location=device))
-        print(f"   ✓ Loaded pre-trained MAGNN from {pretrained_magnn_path}")
+        print(f"Loaded pre-trained MAGNN from {pretrained_magnn_path}")
 
-    # ── Station mapper ────────────────────────────────────────────────────────
     station_mapper = None
     if clusters is not None:
         station_mapper = SegmentStationMapper(
             np.asarray(clusters), known_stops=known_stops or {})
 
-    # ── Travel model (LSTM residual) ──────────────────────────────────────────
     travel_model = MAGNN_LSTM_Residual(
         magnn_base,
         spatial_dim=cfg.gat_hidden,
@@ -295,7 +256,6 @@ def train_magnn_lstm_residual(train_loader, val_loader, test_loader,
         temporal_dim=5,
     ).to(device)
 
-    # Populate per-segment historical median
     try:
         ds  = train_loader.dataset
         sdf = ds.segments_df.copy() if hasattr(ds, 'segments_df') else None
@@ -306,9 +266,9 @@ def train_magnn_lstm_residual(train_loader, val_loader, test_loader,
                 if 0 <= int(idx) < num_segments:
                     seg_means[int(idx)] = float(m)
             travel_model.set_segment_stats(seg_means)
-            print(f"   ✓ segment_mean_sc set from TripDataset segments_df")
+            print(f"segment_mean_sc set from TripDataset segments_df")
     except Exception as ex:
-        print(f"   ⚠ segment_mean_sc: could not compute ({ex}), using zeros")
+        print(f"segment_mean_sc: could not compute ({ex}), using zeros")
 
     # ── Dwell model ───────────────────────────────────────────────────────────
     dwell_model = DwellPredictor(
@@ -338,7 +298,6 @@ def train_magnn_lstm_residual(train_loader, val_loader, test_loader,
     patience_c = 0
     best_ckpt  = os.path.join(output_folder, 'magnn_lstm_residual_best.pth')
 
-    # AMP (automatic mixed precision) — enabled on CUDA, disabled on CPU/MPS.
     _use_amp = hasattr(device, 'type') and device.type == 'cuda'
     if _use_amp:
         from torch.cuda.amp import autocast, GradScaler
@@ -350,7 +309,6 @@ def train_magnn_lstm_residual(train_loader, val_loader, test_loader,
 
     print(f"   LR={lr}  WD={wd}  AMP={'on (CUDA)' if _use_amp else 'off'}\n")
 
-    # ── Training loop ─────────────────────────────────────────────────────────
     for epoch in range(1, cfg.n_epochs + 1):
         travel_model.train()
         dwell_model.train()
@@ -365,16 +323,6 @@ def train_magnn_lstm_residual(train_loader, val_loader, test_loader,
              seg_tgts, lengths, mask) = _unpack_residual_trip_batch(batch, device)
 
             B, T = seg_idx.shape
-
-            # ── Travel: full-trip forward pass ────────────────────────
-            # FIX 1: compute causal cumulative MAGNN error across trip steps.
-            # At step t the gate should see how much MAGNN has been wrong so far,
-            # not zeros. We use the MAGNN baseline from the previous batch step
-            # to compute a running signed error and feed it causally.
-            # Since we don't have ground truth at inference time, we approximate
-            # cum_err as the running sum of (bl - seg_tgts) from prior steps.
-            # For the first forward pass we use zeros, then update step by step.
-            # In sequential mode we pass (B,1) and the LSTM broadcasts it.
             cum_err = torch.zeros(B, 1, device=device)
 
             _fwd_ctx = (_amp_ctx() if _amp_ctx else __import__('contextlib').nullcontext())
@@ -389,34 +337,23 @@ def train_magnn_lstm_residual(train_loader, val_loader, test_loader,
                     return_components=True,
                     cumulative_magnn_error=cum_err,
                 )
-                # bl, lstm_pred, alpha, pred: all (B, T, 1)
                 v = mask.float().unsqueeze(-1)   # (B, T, 1)
                 n_valid = v.sum().clamp(min=1)
 
                 loss_pred   = (F.smooth_l1_loss(pred,      seg_tgts, reduction='none') * v).sum() / n_valid
                 loss_direct = (F.smooth_l1_loss(lstm_pred, seg_tgts, reduction='none') * v).sum() / n_valid
 
-                # FIX 2: alpha_target tells the gate to open wide when MAGNN is wrong.
-                # Use absolute error normalised by median spread → sigmoid pushes
-                # alpha toward 1 for large errors, toward 0 for small errors.
                 with torch.no_grad():
                     magnn_err    = (bl.detach() - seg_tgts).abs()
                     spread       = magnn_err[mask].median().clamp(min=0.15)
                     alpha_target = torch.sigmoid(magnn_err / spread - 1.5)
 
                 loss_gate = (F.mse_loss(alpha, alpha_target, reduction='none') * v).sum() / n_valid
-
-                # FIX 3: REMOVED loss_stability.
-                # loss_stability = ((alpha * magnn_close * v)**2) penalised alpha
-                # being nonzero whenever MAGNN was close (R²≈0.77 → magnn_close=1
-                # most of the time) — the dominant gradient was "push alpha to 0".
-                # This directly caused alpha to converge to 0.5 as a compromise.
-                # Without it, loss_gate alone drives alpha toward the correct value.
                 loss_t = loss_pred + 0.8*loss_direct + 0.3*loss_gate
 
             if not torch.isnan(loss_t) and not torch.isinf(loss_t):
                 if _scaler_travel is not None:
-                    opt_travel.zero_grad(set_to_none=True)   # FIX: was missing, causing gradient accumulation
+                    opt_travel.zero_grad(set_to_none=True)
                     _scaler_travel.scale(loss_t).backward()
                     _scaler_travel.unscale_(opt_travel)
                     torch.nn.utils.clip_grad_norm_(travel_model.parameters(), 1.0)
@@ -434,7 +371,6 @@ def train_magnn_lstm_residual(train_loader, val_loader, test_loader,
                 t_corr      += ((lstm_pred - bl).abs().detach() * v).sum().item() / n_valid.item()
                 t_n         += 1
 
-            # ── Dwell: step-by-step (simple MLP, no sequence needed) ──
             for t in range(T):
                 valid_t = mask[:, t]
                 if not valid_t.any():
@@ -455,7 +391,6 @@ def train_magnn_lstm_residual(train_loader, val_loader, test_loader,
         avg_alpha = t_alpha / max(t_n, 1)
         avg_corr  = t_corr  / max(t_n, 1)
 
-        # ── Validate ──────────────────────────────────────────────────
         travel_model.eval()
         dwell_model.eval()
         vt_preds, vt_tgts = [], []
@@ -522,7 +457,6 @@ def train_magnn_lstm_residual(train_loader, val_loader, test_loader,
                 print(f"\n  ⏹️  Early stopping at epoch {epoch}")
                 break
 
-    # ── Load best ─────────────────────────────────────────────────────────────
     if os.path.exists(best_ckpt):
         ckpt = torch.load(best_ckpt, map_location=device)
         t_filtered = {k: v for k, v in ckpt['travel_model'].items()
@@ -530,7 +464,6 @@ def train_magnn_lstm_residual(train_loader, val_loader, test_loader,
         travel_model.load_state_dict(t_filtered, strict=False)
         dwell_model.load_state_dict(ckpt['dwell_model'])
 
-    # ── Final evaluation ──────────────────────────────────────────────────────
     print_section("MAGNN-LSTM-RESIDUAL — FINAL RESULTS")
 
     def _eval(loader, name):
@@ -558,7 +491,6 @@ def train_magnn_lstm_residual(train_loader, val_loader, test_loader,
                     return_components=True,
                     cumulative_magnn_error=cum_err_e,
                 )
-                # Collect only valid (non-padding) positions
                 all_preds.append(pred[mask].cpu().numpy())
                 all_tgts.append(seg_tgts[mask].cpu().numpy())
                 t_alphas.append(alpha[mask].cpu().numpy())
@@ -605,7 +537,6 @@ def train_magnn_lstm_residual(train_loader, val_loader, test_loader,
             print(f"  {i:>3}  {a:>10.2f}  {p_val:>10.2f}  "
                   f"{err:>9.2f}  {epct:>6.2f}%")
 
-    # ── Segment diagnostic ────────────────────────────────────────────────────
     print_section("SEGMENT DIAGNOSTIC — MAGNN vs LSTM vs Final (first 10 test segments)")
     print(f"  {'#':>3}  {'Seg':>6}  {'Label':<40}  "
           f"{'Actual':>8}  {'MAGNN':>8}  {'LSTM':>8}  "
@@ -674,7 +605,6 @@ def train_magnn_lstm_residual(train_loader, val_loader, test_loader,
 
 
 def main():
-    """Main training loop — baseline MAGNN only."""
 
     config = Config()
 
@@ -694,7 +624,7 @@ def main():
         timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
         output_folder = f"outputs/{ALGORITHM_NAME}_{timestamp}_i{iteration}"
         os.makedirs(output_folder, exist_ok=True)
-        print(f"📁 Output: {output_folder}")
+        print(f"Output: {output_folder}")
 
         try:
             # Start pipeline timing
@@ -709,7 +639,7 @@ def main():
             data_load_time = time.time() - data_load_start
 
             if len(train_df) == 0:
-                print("❌ No training data")
+                print("No training data")
                 continue
 
             known_stops_train = get_known_stops(train_df)
@@ -722,21 +652,19 @@ def main():
                   f"test={len(known_stops_test)}, "
                   f"val={len(known_stops_val)})")
 
-            # Clustering
             clustering_start = time.time()
             clusters, station_cluster_ids = event_driven_clustering_fixed(
                 train_df, known_stops=known_stops
             )
             clustering_time = time.time() - clustering_start
             if len(clusters) == 0:
-                print("❌ No clusters")
+                print("No clusters")
                 continue
 
-            # Segment building
             segment_start = time.time()
             train_segments = build_segments_fixed(train_df, clusters)
             if len(train_segments) == 0:
-                print("❌ No segments")
+                print("No segments")
                 continue
 
             test_segments = build_segments_fixed(test_df, clusters)
@@ -744,9 +672,6 @@ def main():
             segment_time = time.time() - segment_start
             val_segments  = build_segments_fixed(val_df,  clusters)
 
-            # ------------------------------------------------------------------
-            # 4. Plots
-            # ------------------------------------------------------------------
             print_section("GENERATING VISUALISATIONS")
             plot_clusters(
                 clusters, {},
@@ -764,11 +689,6 @@ def main():
                 save_path=os.path.join(
                     output_folder,
                     f'{ALGORITHM_NAME.lower()}-segment_stats.png'))
-
-            # ------------------------------------------------------------------
-            # 5. Adjacency matrices
-            # ------------------------------------------------------------------
-            # Adjacency matrices
             adj_start = time.time()
             adj_geo, adj_dist, adj_soc, segment_types = \
                 build_adjacency_matrices_fixed(
@@ -776,10 +696,9 @@ def main():
             adj_time = time.time() - adj_start
 
             if adj_geo is None:
-                print("❌ Adjacency failed")
+                print("Adjacency failed")
                 continue
 
-            # Dataset creation
             dataset_start = time.time()
             train_dataset = SegmentDataset(
                 train_segments, segment_types, fit_scalers=True)
@@ -803,14 +722,14 @@ def main():
                 shuffle=False, num_workers=0, collate_fn=masked_collate_fn)
             dataset_time = time.time() - dataset_start
 
-            print(f"\n📊 Data Summary:")
+            print(f"\nData Summary:")
             print(f"   Segment types: {len(segment_types)}")
             print(f"   Train: {len(train_dataset):,}  "
                   f"Val: {len(val_dataset):,}  "
                   f"Test: {len(test_dataset):,}")
 
             if len(train_loader) == 0:
-                print("❌ Training loader empty — skipping")
+                print("Training loader empty — skipping")
                 continue
 
             # Training
@@ -825,11 +744,9 @@ def main():
             
             total_pipeline_time = time.time() - pipeline_start
             
-            # Extract inference timing from test results
             test_res = results.get('Test', {})
             inference_timing = test_res.get('inference_timing', {})
             
-            # ==================== PRINT TIMING METRICS ====================
             print(f"\n{'='*60}")
             print(f"TIMING METRICS — {ALGORITHM_NAME}")
             print(f"{'='*60}")
@@ -900,19 +817,14 @@ def main():
             json_path = os.path.join(output_folder, 'metrics.json')
             with open(json_path, 'w') as f:
                 json.dump(metrics_out, f, indent=2)
-            print(f"\n✓ Metrics saved → {json_path}")
-            print(f"✅ Iteration {iteration} complete")
+            print(f"\nMetrics saved → {json_path}")
+            print(f"Iteration {iteration} complete")
 
         except Exception as e:
-            print(f"\n❌ Error in iteration {iteration}: {e}")
+            print(f"\nError in iteration {iteration}: {e}")
             import traceback
             traceback.print_exc()
             continue
-
-
-# =============================================================================
-# THREE-WAY COMPARISON TABLE HELPER
-# =============================================================================
 
 def print_three_way_comparison_table(magnn_results, residual_results,
                                      mtl_results, split_name):
@@ -952,16 +864,11 @@ def print_three_way_comparison_table(magnn_results, residual_results,
 
     print(f"{'=' * 120}\n")
 
-
-# =============================================================================
-# THREE-WAY COMPARISON MODE
-# =============================================================================
-
 def main_with_three_way_comparison():
 
     config = Config()
 
-    print_section("🔬 THREE-WAY COMPARISON MODE")
+    print_section("THREE-WAY COMPARISON MODE")
     print(f"  Device: {DEVICE}   Algorithm: {ALGORITHM_NAME}")
     print(f"\n  Models:")
     print(f"    1. MAGNN (baseline segment predictor)")
@@ -974,7 +881,7 @@ def main_with_three_way_comparison():
     all_mtl_results      = []
 
     for iteration in range(1, config.n_iterations + 1):
-        print_section(f"🔄 ITERATION {iteration}/{config.n_iterations}")
+        print_section(f"ITERATION {iteration}/{config.n_iterations}")
 
         timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
         output_folder = (f"outputs/{ALGORITHM_NAME}_{timestamp}"
@@ -982,7 +889,6 @@ def main_with_three_way_comparison():
         os.makedirs(output_folder, exist_ok=True)
 
         try:
-            # ── 1. Data ───────────────────────────────────────────────
             print("\n[1/10] Loading data...")
             train_df, test_df, val_df = load_train_test_val_data_fixed(
                 data_folder=config.data_folder,
@@ -994,18 +900,15 @@ def main_with_three_way_comparison():
             known_stops = {**known_stops_test, **known_stops_val,
                            **known_stops_train}
 
-            # ── 2. Clustering ─────────────────────────────────────────
             print("[2/10] Clustering stops...")
             clusters, station_cluster_ids = event_driven_clustering_fixed(
                 train_df, known_stops=known_stops)
 
-            # ── 3. Segments ───────────────────────────────────────────
             print("[3/10] Building segments...")
             train_segments = build_segments_fixed(train_df, clusters)
             test_segments  = build_segments_fixed(test_df,  clusters)
             val_segments   = build_segments_fixed(val_df,   clusters)
 
-            # ── 3b. Visualisations ────────────────────────────────────
             print("[3b/10] Generating visualisations...")
             plot_clusters(
                 clusters, {}, algorithm_name=ALGORITHM_NAME,
@@ -1024,13 +927,11 @@ def main_with_three_way_comparison():
                     output_folder,
                     f'{ALGORITHM_NAME.lower()}-segment_stats.png'))
 
-            # ── 4. Adjacency ──────────────────────────────────────────
             print("[4/10] Building adjacency matrices...")
             adj_geo, adj_dist, adj_soc, segment_types = \
                 build_adjacency_matrices_fixed(
                     train_segments, clusters, known_stops=known_stops)
 
-            # ── 5. MAGNN datasets ─────────────────────────────────────
             print("[5/10] Preparing MAGNN datasets...")
             train_ds_magnn = SegmentDataset(
                 train_segments, segment_types, fit_scalers=True)
@@ -1053,11 +954,6 @@ def main_with_three_way_comparison():
                 test_ds_magnn, batch_size=config.batch_size,
                 shuffle=False, num_workers=0, collate_fn=masked_collate_fn)
 
-            # ── 6. Trip datasets (Residual LSTM + DualTaskMTL) ───────
-            # Both the residual LSTM and the hierarchical trip predictor
-            # use trip-grouped sequences — segments sorted by departure_time
-            # within each trip_id so the LSTM sees real sequential context
-            # and cum_err accumulates meaningfully across the trip.
             print("[6/10] Preparing Trip datasets "
                   "(trip_id + same-day grouping, sorted by departure_time)...")
             (train_loader_trip, val_loader_trip, test_loader_trip,
@@ -1068,7 +964,7 @@ def main_with_three_way_comparison():
                 max_trip_length=15,
             )
 
-            print(f"\n📊 Dataset Summary:")
+            print(f"\nDataset Summary:")
             print(f"   Trip train: {len(train_ds_trip):,} trips  "
                   f"val: {len(val_loader_trip.dataset):,}  "
                   f"test: {len(test_loader_trip.dataset):,}")
@@ -1078,7 +974,6 @@ def main_with_three_way_comparison():
                 print(f"   Clusters matched to named stations: "
                       f"{n_matched}/{sm.n_clusters}")
 
-            # ── 7. Train MAGNN ────────────────────────────────────────
             print("\n[7/10] Training MAGNN (baseline)...")
             print("-" * 80)
             magnn_results, magnn_model = train_magtte(
@@ -1090,10 +985,6 @@ def main_with_three_way_comparison():
             all_magnn_results.append(magnn_results)
             magnn_checkpoint = os.path.join(output_folder, 'magtte_best.pth')
 
-            # ── 8. Train Residual ─────────────────────────────────────
-            # Uses trip-grouped sequences so the LSTM actually learns from
-            # prior stops and cum_err accumulates across each trip.
-            # Negative scaled values = faster than median — not an error.
             print("\n[8/10] Training MAGNN-LSTM-Residual (trip-sequential)...")
             print("-" * 80)
             residual_results, residual_model = train_magnn_lstm_residual(
@@ -1108,10 +999,6 @@ def main_with_three_way_comparison():
             )
             all_residual_results.append(residual_results)
 
-            # ── 9. Train Hierarchical Trip Predictor ─────────────────
-            # Uses the same TripDataset loaders as the residual LSTM.
-            # LOCAL  task: per-segment duration (auxiliary gradient signal)
-            # GLOBAL task: total_travel_time_sec (primary objective)
             print("\n[9/10] Training Hierarchical Trip Predictor "
                   "(cumulative correction, local+global MTL)...")
             print("-" * 80)
@@ -1126,10 +1013,9 @@ def main_with_three_way_comparison():
             )
             all_mtl_results.append(mtl_results)
 
-            # ── 10. Report ────────────────────────────────────────────
             print("\n[10/10] Generating comparison report...")
             print_section(
-                f"📊 ITERATION {iteration} — THREE-WAY COMPARISON")
+                f"ITERATION {iteration} — THREE-WAY COMPARISON")
             for split in ['Train', 'Val', 'Test']:
                 print_three_way_comparison_table(
                     magnn_results, residual_results, mtl_results, split)
@@ -1167,18 +1053,17 @@ def main_with_three_way_comparison():
                                      'three_way_comparison.json')
             with open(json_path, 'w') as f:
                 json.dump(comparison_json, f, indent=2)
-            print(f"✓ Comparison saved → {json_path}\n")
+            print(f"Comparison saved → {json_path}\n")
 
         except Exception as e:
-            print(f"\n❌ Error in iteration {iteration}: {e}")
+            print(f"\nError in iteration {iteration}: {e}")
             import traceback
             traceback.print_exc()
             continue
 
-    # ── Final summary ─────────────────────────────────────────────────────
     if all_magnn_results and all_residual_results and all_mtl_results:
         n_iters = len(all_magnn_results)
-        print_section("🏆 FINAL SUMMARY — AVERAGED ACROSS ALL ITERATIONS")
+        print_section("FINAL SUMMARY — AVERAGED ACROSS ALL ITERATIONS")
 
         for split in ['Train', 'Val', 'Test']:
             print(f"\n{'=' * 120}")
@@ -1224,9 +1109,8 @@ def main_with_three_way_comparison():
 
             print(f"{'=' * 120}\n")
 
-        # ── Statistical significance testing ──────────────────────────────────
         if n_iters >= 3:
-            print_section("📐 STATISTICAL SIGNIFICANCE TESTING  "
+            print_section("STATISTICAL SIGNIFICANCE TESTING  "
                           f"(n={n_iters} independent runs, Test set)")
             print("  Per the methodology (§4.4.4): two non-parametric tests are used.")
             print("  (A) Wilcoxon Signed-Rank — paired, each baseline vs MA-GNN-LSTM")
@@ -1367,14 +1251,9 @@ def main_with_three_way_comparison():
             print(f"  least one model differs. Wilcoxon (A) identifies which pairs.")
 
 
-    print_section("✅ THREE-WAY COMPARISON COMPLETE")
+    print_section("THREE-WAY COMPARISON COMPLETE")
     print(f"  Results saved in: outputs/{ALGORITHM_NAME}_*_three_way/")
     print("=" * 80)
-
-
-# =============================================================================
-# ABLATION STUDY MODE
-# =============================================================================
 
 def print_ablation_comparison_table(full_results, no_op_results,
                                     no_weather_results, baseline_results,
@@ -1429,7 +1308,7 @@ def main_with_ablation_study():
 
     config = Config()
 
-    print_section("🔬 ABLATION STUDY MODE — MAGNN-LSTM-MTL (Full Model)")
+    print_section("ABLATION STUDY MODE — MAGNN-LSTM-MTL (Full Model)")
     print(f"  Device: {DEVICE}   Algorithm: {ALGORITHM_NAME}")
     print(f"\n  All 4 variants train the COMPLETE MAGNN-LSTM-MTL model")
     print(f"  (Residual encoder → MTL trip predictor) with features ablated.")
@@ -1450,7 +1329,7 @@ def main_with_ablation_study():
                     'winddirection_10m']
 
     for iteration in range(1, config.n_iterations + 1):
-        print_section(f"🔄 ITERATION {iteration}/{config.n_iterations}")
+        print_section(f"ITERATION {iteration}/{config.n_iterations}")
 
         timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
         output_folder = (f"outputs/{ALGORITHM_NAME}_{timestamp}"
@@ -1458,7 +1337,6 @@ def main_with_ablation_study():
         os.makedirs(output_folder, exist_ok=True)
 
         try:
-            # ── 1. Data ───────────────────────────────────────────────
             print("\n[1/9] Loading data...")
             train_df, test_df, val_df = load_train_test_val_data_fixed(
                 data_folder=config.data_folder,
@@ -1471,24 +1349,20 @@ def main_with_ablation_study():
                            **known_stops_train}
             print(f"   Known stops: {len(known_stops)}")
 
-            # ── 2. Clustering ─────────────────────────────────────────
             print("[2/9] Clustering stops...")
             clusters, _ = event_driven_clustering_fixed(
                 train_df, known_stops=known_stops)
 
-            # ── 3. Segments ───────────────────────────────────────────
             print("[3/9] Building segments...")
             train_segments = build_segments_fixed(train_df, clusters)
             test_segments  = build_segments_fixed(test_df,  clusters)
             val_segments   = build_segments_fixed(val_df,   clusters)
 
-            # ── 4. Adjacency ──────────────────────────────────────────
             print("[4/9] Building adjacency matrices...")
             adj_geo, adj_dist, adj_soc, segment_types = \
                 build_adjacency_matrices_fixed(
                     train_segments, clusters, known_stops=known_stops)
 
-            # ── 5. Train base MAGNN ───────────────────────────────────
             print("\n[5/9] Training base MAGNN for transfer learning...")
             print("-" * 80)
             train_ds_magnn = SegmentDataset(
@@ -1520,10 +1394,6 @@ def main_with_ablation_study():
             )
             magnn_checkpoint = os.path.join(output_folder, 'magtte_best.pth')
 
-            # ----------------------------------------------------------
-            # Helper: build trip loaders from (optionally zeroed) segs
-            # Uses TripDataset so the LSTM sees real sequential context.
-            # ----------------------------------------------------------
             def _ablation_loaders(tr_seg, va_seg, te_seg):
                 return _make_trip_loaders(
                     tr_seg, va_seg, te_seg,
@@ -1532,13 +1402,6 @@ def main_with_ablation_study():
                     max_trip_length=15,
                 )
 
-            # ----------------------------------------------------------
-            # _run_full_mtl: trains MAGNN-LSTM-Residual first (for the
-            # pretrained encoder) then the full MAGNN-LSTM-MTL on top.
-            # This ensures ablation measures the effect of weather and
-            # operational delay on the COMPLETE MAGNN-LSTM-MTL model.
-            # Returns results from the MTL (trip-level) stage.
-            # ----------------------------------------------------------
             def _run_full_mtl(tl, vl, tstl, ds_train, tag):
                 # Stage 1: residual LSTM (encoder warm-up)
                 _, residual_mdl = train_magnn_lstm_residual(
@@ -1551,7 +1414,6 @@ def main_with_ablation_study():
                     pretrained_magnn_path=magnn_checkpoint,
                     freeze_magnn=True,
                 )
-                # Stage 2: full MAGNN-LSTM-MTL (trip-level, primary model)
                 mtl_res, _ = train_trip_level_predictor(
                     tl, vl, tstl,
                     segment_types, ds_train.trip_target_scaler,
@@ -1563,16 +1425,14 @@ def main_with_ablation_study():
                 )
                 return mtl_res, None
 
-            # ── 6. FULL ───────────────────────────────────────────────
             print("\n[6/9] Training MAGNN-LSTM-MTL — FULL (all features)...")
             print("-" * 80)
             tl, vl, tstl, ds = _ablation_loaders(
                 train_segments, val_segments, test_segments)
             full_results, _ = _run_full_mtl(tl, vl, tstl, ds, "full")
             all_full_results.append(full_results)
-            print("   ✓ Full model trained")
+            print("Full model trained")
 
-            # ── 7. NO OPERATIONAL ─────────────────────────────────────
             print("\n[7/9] Training MAGNN-LSTM-MTL — NO OPERATIONAL "
                   "(arrivalDelay / departureDelay / is_weekend / is_peak_hour zeroed)...")
             print("-" * 80)
@@ -1588,9 +1448,8 @@ def main_with_ablation_study():
             tl, vl, tstl, ds = _ablation_loaders(tr_no_op, va_no_op, te_no_op)
             no_op_results, _ = _run_full_mtl(tl, vl, tstl, ds, "no_op")
             all_no_operational_results.append(no_op_results)
-            print("   ✓ No-operational model trained")
+            print("No-operational model trained")
 
-            # ── 8. NO WEATHER ─────────────────────────────────────────
             print("\n[8/9] Training MAGNN-LSTM-MTL — NO WEATHER "
                   "(all weather columns zeroed)...")
             print("-" * 80)
@@ -1606,9 +1465,8 @@ def main_with_ablation_study():
             no_weather_results, _ = _run_full_mtl(tl, vl, tstl, ds,
                                                   "no_weather")
             all_no_weather_results.append(no_weather_results)
-            print("   ✓ No-weather model trained")
+            print("No-weather model trained")
 
-            # ── 9. BASELINE ───────────────────────────────────────────
             print("\n[9/9] Training MAGNN-LSTM-MTL — BASELINE "
                   "(spatial + temporal only; all op + weather zeroed)...")
             print("-" * 80)
@@ -1627,17 +1485,15 @@ def main_with_ablation_study():
             tl, vl, tstl, ds = _ablation_loaders(tr_bl, va_bl, te_bl)
             baseline_results, _ = _run_full_mtl(tl, vl, tstl, ds, "baseline")
             all_baseline_results.append(baseline_results)
-            print("   ✓ Baseline model trained")
+            print("Baseline model trained")
 
-            # ── Comparison table ──────────────────────────────────────
             print_section(
-                f"📊 ITERATION {iteration} — ABLATION STUDY RESULTS")
+                f"ITERATION {iteration} — ABLATION STUDY RESULTS")
             for split in ('Train', 'Val', 'Test'):
                 print_ablation_comparison_table(
                     full_results, no_op_results,
                     no_weather_results, baseline_results, split)
 
-            # Save JSON
             ablation_json = {
                 'iteration': iteration,
                 'algorithm': ALGORITHM_NAME,
@@ -1664,7 +1520,7 @@ def main_with_ablation_study():
             json_path = os.path.join(output_folder, 'ablation_study.json')
             with open(json_path, 'w') as f:
                 json.dump(ablation_json, f, indent=2)
-            print(f"✓ Ablation results saved → {json_path}\n")
+            print(f"Ablation results saved → {json_path}\n")
 
         except Exception as e:
             print(f"\nError in iteration {iteration}: {e}")
@@ -1672,12 +1528,11 @@ def main_with_ablation_study():
             traceback.print_exc()
             continue
 
-    # ── Final summary ─────────────────────────────────────────────────────
     if (all_full_results and all_no_operational_results
             and all_no_weather_results and all_baseline_results):
 
         n_iters = len(all_full_results)
-        print_section("🏆 ABLATION STUDY — FINAL SUMMARY  "
+        print_section("ABLATION STUDY — FINAL SUMMARY  "
                       f"(MAGNN-LSTM-MTL, n={n_iters} iterations)")
 
         for split in ('Train', 'Val', 'Test'):
@@ -1733,8 +1588,7 @@ def main_with_ablation_study():
 
             print(f"{'=' * 130}\n")
 
-        # ── Statistical significance testing (n=30) ───────────────────────────
-        print_section("📐 STATISTICAL SIGNIFICANCE TESTING  "
+        print_section("STATISTICAL SIGNIFICANCE TESTING  "
                       f"(n={n_iters} independent runs, Test set)")
         print("  Per the methodology (§4.4.3 / §4.4.4): two non-parametric tests.")
         print("  (A) Wilcoxon Signed-Rank — paired, each ablated variant vs Full model")
@@ -1875,7 +1729,7 @@ def main_with_ablation_study():
 
 
         # ── Feature importance analysis ───────────────────────────────────────
-        print_section("🔍 FEATURE IMPORTANCE ANALYSIS  (MAGNN-LSTM-MTL)")
+        print_section("FEATURE IMPORTANCE ANALYSIS  (MAGNN-LSTM-MTL)")
         for split in ('Test',):
             full_r2     = np.nanmean([r.get(split, {}).get('r2', float('nan'))
                                       for r in all_full_results])
@@ -1901,13 +1755,13 @@ def main_with_ablation_study():
             print(f"    Combined (Op + Weather): {combined:+.4f}")
 
             if op_contribution > w_contribution:
-                print(f"\n  💡 Operational features contribute MORE "
+                print(f"\n Operational features contribute MORE "
                       f"(Δ={op_contribution - w_contribution:+.4f})")
             elif w_contribution > op_contribution:
-                print(f"\n  💡 Weather features contribute MORE "
+                print(f"\n  Weather features contribute MORE "
                       f"(Δ={w_contribution - op_contribution:+.4f})")
             else:
-                print(f"\n  💡 Both feature groups contribute equally")
+                print(f"\n  Both feature groups contribute equally")
 
             # Bootstrap 95% CI for ΔR² (uses all n iterations as resampling pool)
             if n_iters >= 5:
@@ -1939,7 +1793,7 @@ def main_with_ablation_study():
                 print(f"    ΔR² Combined:    {combined:+.4f}  "
                       f"CI={_ci(co_boot)}")
 
-    print_section("✅ ABLATION STUDY COMPLETE")
+    print_section("ABLATION STUDY COMPLETE")
     print(f"  Total iterations: {len(all_full_results)}")
     print(f"  Model:   MAGNN-LSTM-MTL (full pipeline, trip-level predictions)")
     print(f"  Results: outputs/{ALGORITHM_NAME}_*_ablation/")

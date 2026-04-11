@@ -1,17 +1,3 @@
-"""
-cluster_knn.py
-==============
-Mutual KNN-graph clustering with density-adaptive K selection.
-
-Public API (identical across all cluster_*.py modules):
-    event_driven_clustering_fixed(df, known_stops=None)
-        -> (cluster_centers: np.ndarray shape (N,2),
-            station_cluster_ids: set of int)
-
-To switch clustering method in main.py, change only:
-    from cluster_knn import event_driven_clustering_fixed
-"""
-
 import numpy as np
 import pandas as pd
 from sklearn.neighbors import NearestNeighbors, BallTree
@@ -24,71 +10,6 @@ warnings.filterwarnings('ignore')
 from config import print_section, haversine_meters
 
 def simple_clustering(df, speed_threshold=2.0, known_stops=None, station_exclusion_radius_m=300):
-    """
-    Cluster transit stops using K-Nearest Neighbors (KNN) graph-based clustering.
-
-    This function identifies potential transit stops by filtering low-speed GPS points,
-    builds a KNN graph where each point connects to its K nearest neighbors, then
-    extracts clusters from connected components of the resulting graph.
-
-    Unlike K-Means or GMM, this algorithm does NOT require a target cluster count.
-    The number of clusters emerges naturally from the data's connectivity structure.
-
-    Algorithm Steps:
-        1. Filter low-speed points (potential stops where vehicles pause)
-        2. Remove outliers and invalid coordinates
-        3. Build KNN graph using BallTree for efficient nearest neighbor search
-        4. Create mutual KNN graph (symmetric connections)
-        5. Find connected components as natural clusters
-        6. Filter out micro-components (noise)
-        7. Calculate cluster centers as centroids
-
-    Args:
-        df (pd.DataFrame): Transit GPS data with required columns:
-            - 'latitude': GPS latitude coordinate (float)
-            - 'longitude': GPS longitude coordinate (float)
-            - 'speed_mps' (optional): Speed in meters per second (float)
-        speed_threshold (float): Maximum speed (m/s) to consider a point as a
-            potential stop. Points with speed >= threshold are excluded.
-            Default is 2.0 m/s (~7.2 km/h, typical walking speed).
-
-    Returns:
-        tuple: A tuple containing:
-            - cluster_centers (np.ndarray): Array of shape (N, 2) with
-              [latitude, longitude] for each cluster center. N is determined
-              naturally by the data's connectivity structure.
-            - cluster_info (dict): Dictionary mapping cluster index to metadata:
-              {
-                  'center': (lat, lon),      # Cluster centroid
-                  'size': int,               # Number of points in cluster
-                  'method': 'knn_graph',     # Clustering method used
-                  'k_neighbors': int         # K value used for KNN
-              }
-
-    Raises:
-        No exceptions raised; returns empty arrays if clustering fails.
-
-    Example:
-        >>> clusters, info = simple_clustering(train_df)
-        >>> print(f"Found {len(clusters)} clusters")
-        Found 47 clusters
-        >>> print(f"Cluster 0: center={info[0]['center']}, size={info[0]['size']}")
-        Cluster 0: center=(40.7128, -74.0060), size=156
-
-    Notes:
-        - Uses Haversine distance for geographic accuracy
-        - K value is auto-calculated based on data density
-        - Mutual KNN ensures symmetric relationships (A→B implies B→A)
-        - Cluster count is data-driven — no target count needed
-        - Small clusters (<min_component_size points) are filtered as noise
-        - Computational complexity: O(n * k * log(n)) for KNN search
-
-    References:
-        - Cover, T., Hart, P. (1967). Nearest neighbor pattern classification.
-        - Ertöz, L., Steinbach, M., Kumar, V. (2003). Finding clusters of different
-          sizes, shapes, and densities in noisy, high dimensional data.
-    """
-
     print_section("STEP 2: CLUSTERING STOPS/STATIONS (KNN GRAPH)")
 
     if df.empty:
