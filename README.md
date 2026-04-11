@@ -1,5 +1,17 @@
 # THS3‑HXIL‑RightOnTrack — MAGNN‑LSTM‑MTL
 
+## Project Information
+- **Right on Track:** Right on Track: A Hybrid Approach to Travel Time Estimation
+- **Proponents:**
+  - Joehanna Cansino (joehanna_cansino@dlsu.edu.ph)
+  - Harmony Claire Dy (harmony_dy@dlsu.edu.ph)
+  - Christa Ysabel Hernandez (christa_hernandez@dlsu.edu.ph)
+  - Justine Nicole Uy (justine_nicole_uy@dlsu.edu.ph)
+- **Adviser:** - Briane Paul V. Samson (briane.samson@dlsu.edu.ph)
+
+## Thesis Overview
+This study develops MAGNN-LSTM-MTL, a hybrid deep learning model for estimating train travel times in urban rail transit systems, applied to real-world operational data from the Canberra Metro Light Rail Transit system in Australia — a 14-station, 12-kilometer corridor spanning Gungahlin Place to Alinga Street. Conventional travel time estimation models rely on fixed schedules and distance-based calculations that fail to capture the dynamic factors governing actual train operations, including station dwell times, operational arrival and departure delays, cascading network congestion, and weather conditions. The proposed pipeline addresses this by integrating three complementary components: a Multi-Attention Graph Neural Network (MAGNN) that models the rail network as a multi-view weighted graph to capture how delays propagate spatially across stations, a Long Short-Term Memory (LSTM) residual corrector that learns temporal patterns in travel time fluctuations, and a Multi-Task Learning (MTL) head with a learned bias correction mechanism that explicitly suppresses the error accumulation problem inherent in segment-by-segment prediction. This produces reliable full-trip duration estimates from a hierarchical, operationally-grounded architecture.
+
 This repository implements an end‑to‑end spatiotemporal learning pipeline for rail/transit travel‑time modeling. The core workflow is:
 
 1) Load GPS + operational + weather datasets (train/val/test)
