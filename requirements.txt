@@ -7,3 +7,4 @@ torchvision>=0.15
 hdbscan>=0.8.33
 contextily>=1.4
 matplotlib>=3.7
+pyproj
