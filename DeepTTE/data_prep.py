@@ -3,7 +3,7 @@ import json
 import numpy as np
 from geopy.distance import geodesic
 
-# if needed, change the path to your local train_data.csv
+
 df = pd.read_csv("/Users/joehannacansino/Desktop/THS3/data/train_data.csv")
 
 df["timestamp"] = pd.to_datetime(df["timestamp"], errors="coerce")
